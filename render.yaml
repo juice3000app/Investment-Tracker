@@ -18,7 +18,12 @@ services:
     runtime: python
     plan: free
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn live_app.server:app --bind 0.0.0.0:$PORT"
+    # --timeout 240: /api/refresh and /run-daily-job scan the whole ticker
+    # universe (~200+ names) one at a time -- gunicorn's default 30s worker
+    # timeout can kill that request mid-scan on a slow day, before any of
+    # the run's results (or the scan diagnostics) ever get written or
+    # returned. 240s gives it room to actually finish.
+    startCommand: "gunicorn live_app.server:app --bind 0.0.0.0:$PORT --timeout 240"
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION

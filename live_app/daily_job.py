@@ -19,7 +19,9 @@ job performs that bookkeeping automatically (see state.merge_addon_into_base).
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
+import time
 import traceback
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -32,6 +34,43 @@ from . import notify, settings as live_settings, state
 # How far back to pull price history per open position, so the stagnation
 # rolling lookback and volatility screen both have enough data.
 PRICE_HISTORY_LOOKBACK_DAYS = 400
+
+# Per-ticker wall-clock budget for the candidate scan (see
+# _scan_upcoming_catalysts). Yahoo Finance rate-limits requests from cloud
+# hosts (HTTP 429 on the crumb/API call); when that happens, yfinance falls
+# back to scraping Yahoo's web page directly, and that fallback has been
+# observed to hang for 30+ seconds parsing a single ticker's HTML -- long
+# enough to blow past gunicorn's worker timeout and kill the whole request
+# before it records anything (not even a diagnostic). A single worker thread
+# reused across the scan lets one slow ticker be abandoned after this many
+# seconds without adding real network concurrency (which risks tripping
+# Yahoo's rate limit harder).
+_SCAN_FETCH_TIMEOUT_SECONDS = 10
+
+# How long a cached earnings-date answer is trusted before re-asking Yahoo.
+# This runs at most once/day in practice (daily job, or an occasional manual
+# refresh) -- 20h means a normal daily cadence always gets one fresh check
+# per ticker per day, while a same-day repeat (e.g. someone clicking
+# "Refresh now" twice) reuses the earlier answer instead of hitting Yahoo
+# again for all ~200+ tickers.
+_EARNINGS_CACHE_MAX_AGE_HOURS = 20.0
+
+# A small gap between tickers that actually need a live Yahoo call (cache
+# misses only -- cache hits skip this entirely). Bursting ~200+ requests
+# back-to-back is what triggers Yahoo's rate limiting in the first place;
+# spacing them out costs a few minutes on a cold cache but should mean far
+# fewer 429s, and after the first run most tickers come from cache anyway.
+_SCAN_REQUEST_SPACING_SECONDS = 0.4
+
+# Hard ceiling on the whole scan's wall-clock time, checked between tickers.
+# Per-ticker timeouts bound a single slow ticket, but with a large enough
+# universe even well-behaved per-ticker timeouts can add up past gunicorn's
+# worker timeout (render.yaml sets that to 240s) -- so the scan stops
+# itself early with a clear "stopped early" diagnostic rather than risk
+# gunicorn killing the whole request and returning nothing at all. Kept
+# safely below the worker timeout to leave room for everything else
+# run_once() does before and after this call.
+_SCAN_TOTAL_BUDGET_SECONDS = 180.0
 
 # Universe used by the forward-looking scanner. Configurable via env var;
 # defaults to the pre-vetted, smaller S&P/TSX Composite universe since
@@ -106,12 +145,17 @@ def _scan_upcoming_catalysts(
         "universe_size": 0,
         "universe_fetch_error": None,
         "already_held_skipped": 0,
+        "earnings_cache_hits": 0,
         "earnings_fetch_errors": 0,
+        "earnings_fetch_timeouts": 0,
         "no_upcoming_earnings": 0,
         "history_fetch_errors": 0,
+        "history_fetch_timeouts": 0,
         "empty_history": 0,
         "screened_out": 0,
         "passed": 0,
+        "stopped_early": False,
+        "tickers_checked": 0,
     }
     try:
         if LIVE_UNIVERSE_MODE == "index":
@@ -126,41 +170,104 @@ def _scan_upcoming_catalysts(
     diagnostics["universe_size"] = len(universe)
 
     window_end = today + timedelta(days=params.catalyst_window_days)
-    for u in universe:
-        if u.ticker in already_held:
-            diagnostics["already_held_skipped"] += 1
-            continue
-        try:
-            catalysts = ds.fetch_earnings_dates(u.ticker, lookback_start=today, lookahead_end=window_end)
-        except Exception:
-            diagnostics["earnings_fetch_errors"] += 1
-            continue
-        if not catalysts:
-            diagnostics["no_upcoming_earnings"] += 1
-            continue
-        next_catalyst = min(catalysts)
+    # A small pool, not a single worker: a `with ThreadPoolExecutor(...)`
+    # block's default shutdown(wait=True) on exit would block this
+    # function's *return* on any task we've already given up on via
+    # .result(timeout=...) -- and with only one worker, a hung call also
+    # occupies the only thread, so every ticker queued behind it never
+    # gets a chance to run before its own timeout fires, defeating the
+    # point of a per-ticker timeout entirely. A handful of workers plus an
+    # explicit non-blocking shutdown means one stuck ticker only ever
+    # costs its own timeout, never anyone else's turn.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    try:
 
-        try:
-            history = _fetch_history(u.ticker, today)
-        except Exception:
-            diagnostics["history_fetch_errors"] += 1
-            continue
-        if history.empty:
-            diagnostics["empty_history"] += 1
-            continue
-        shares_out = ds.fetch_shares_outstanding(u.ticker) or 0.0
-        screen = strat.evaluate_candidate_screen(history, shares_out, params)
-        if screen.passed:
-            diagnostics["passed"] += 1
-            results.append(
-                {
-                    "ticker": u.ticker,
-                    "catalyst_date": next_catalyst.isoformat(),
-                    "days_until": (next_catalyst - today).days,
-                }
-            )
-        else:
-            diagnostics["screened_out"] += 1
+        def call_with_timeout(fn, *args, **kwargs):
+            return pool.submit(fn, *args, **kwargs).result(timeout=_SCAN_FETCH_TIMEOUT_SECONDS)
+
+        scan_started_at = time.monotonic()
+        for u in universe:
+            if time.monotonic() - scan_started_at > _SCAN_TOTAL_BUDGET_SECONDS:
+                diagnostics["stopped_early"] = True
+                break
+            diagnostics["tickers_checked"] += 1
+
+            if u.ticker in already_held:
+                diagnostics["already_held_skipped"] += 1
+                continue
+
+            # Cached first: this runs at most once a day, and earnings dates
+            # barely change day to day, so re-asking Yahoo for all ~200+
+            # tickers on every single run is the main reason it gets
+            # rate-limited in the first place. Cache the FULL unfiltered
+            # list Yahoo has (not just today's window) so changing the
+            # scan window later doesn't invalidate everything already cached.
+            cached = state.get_cached_earnings_dates(u.ticker, max_age_hours=_EARNINGS_CACHE_MAX_AGE_HOURS)
+            if cached is not None:
+                diagnostics["earnings_cache_hits"] += 1
+                all_catalysts = cached
+            else:
+                fetch_failed = False
+                try:
+                    all_catalysts = call_with_timeout(ds.fetch_earnings_dates, u.ticker)
+                except concurrent.futures.TimeoutError:
+                    diagnostics["earnings_fetch_timeouts"] += 1
+                    fetch_failed = True
+                except Exception:
+                    diagnostics["earnings_fetch_errors"] += 1
+                    fetch_failed = True
+                finally:
+                    # Applies to every real Yahoo hit regardless of outcome
+                    # -- spacing these out is what actually reduces the
+                    # rate-limiting risk; cache hits above skip it entirely.
+                    time.sleep(_SCAN_REQUEST_SPACING_SECONDS)
+                if fetch_failed:
+                    continue
+                # Only cache a real answer -- a transient failure above
+                # already skipped this ticker, so it gets retried next run
+                # instead of being stuck on a bad cache.
+                state.save_cached_earnings_dates(u.ticker, all_catalysts)
+
+            catalysts = [d for d in all_catalysts if today <= d <= window_end]
+            if not catalysts:
+                diagnostics["no_upcoming_earnings"] += 1
+                continue
+            next_catalyst = min(catalysts)
+
+            try:
+                history = call_with_timeout(_fetch_history, u.ticker, today)
+            except concurrent.futures.TimeoutError:
+                diagnostics["history_fetch_timeouts"] += 1
+                continue
+            except Exception:
+                diagnostics["history_fetch_errors"] += 1
+                continue
+            if history.empty:
+                diagnostics["empty_history"] += 1
+                continue
+            try:
+                shares_out = call_with_timeout(ds.fetch_shares_outstanding, u.ticker) or 0.0
+            except Exception:
+                shares_out = 0.0
+            screen = strat.evaluate_candidate_screen(history, shares_out, params)
+            if screen.passed:
+                diagnostics["passed"] += 1
+                results.append(
+                    {
+                        "ticker": u.ticker,
+                        "catalyst_date": next_catalyst.isoformat(),
+                        "days_until": (next_catalyst - today).days,
+                    }
+                )
+            else:
+                diagnostics["screened_out"] += 1
+    finally:
+        # wait=False + cancel_futures=True: don't block returning results
+        # (and the diagnostics explaining them) on whatever a hung ticker
+        # is still doing -- we've already moved on and counted it as a
+        # timeout above. The abandoned thread(s) die with the process/
+        # gunicorn worker; nothing here waits on them.
+        pool.shutdown(wait=False, cancel_futures=True)
     return results, diagnostics
 
 
@@ -440,20 +547,48 @@ def run_once(send_email: bool = True) -> dict:
         # Zero candidates is a legitimate result (the screen is strict), but
         # it's indistinguishable from "every network call failed" unless we
         # say so explicitly -- surface it in both places a user would look.
+        fetch_failures = (
+            scan_diagnostics["earnings_fetch_errors"]
+            + scan_diagnostics["earnings_fetch_timeouts"]
+            + scan_diagnostics["history_fetch_errors"]
+            + scan_diagnostics["history_fetch_timeouts"]
+        )
+        # How many tickers actually needed a live Yahoo call this run --
+        # cache hits and already-held skips never touched the network, so
+        # they shouldn't count toward "how much of the scan failed". Based
+        # on tickers_checked, not universe_size, since a scan that stopped
+        # early never got to the rest of the universe at all.
+        attempted = (
+            scan_diagnostics["tickers_checked"]
+            - scan_diagnostics["already_held_skipped"]
+            - scan_diagnostics["earnings_cache_hits"]
+        )
         if scan_diagnostics["universe_fetch_error"]:
             note = f"Universe fetch failed: {scan_diagnostics['universe_fetch_error']}"
         elif scan_diagnostics["universe_size"] == 0:
             note = "Universe list came back empty (LIVE_UNIVERSE_MODE misconfigured, or the source list is empty)."
-        elif scan_diagnostics["earnings_fetch_errors"] + scan_diagnostics["history_fetch_errors"] >= scan_diagnostics["universe_size"] * 0.5:
+        elif scan_diagnostics["stopped_early"]:
             note = (
-                f"{scan_diagnostics['earnings_fetch_errors']} earnings-date fetches and "
-                f"{scan_diagnostics['history_fetch_errors']} price-history fetches failed out of "
-                f"{scan_diagnostics['universe_size']} tickers in the universe -- looks like Yahoo Finance "
-                f"is blocking or rate-limiting requests from this host, not a real zero-candidate result."
+                f"Scan stopped after {_SCAN_TOTAL_BUDGET_SECONDS:.0f}s to stay well under the server's "
+                f"request timeout -- only got through {scan_diagnostics['tickers_checked']} of "
+                f"{scan_diagnostics['universe_size']} tickers ({scan_diagnostics['earnings_cache_hits']} "
+                f"from cache). The rest will get picked up on the next run; each one only needs a live "
+                f"check once a day, so coverage should improve as the cache fills in."
+            )
+        elif attempted > 0 and fetch_failures >= attempted * 0.5:
+            note = (
+                f"{scan_diagnostics['earnings_fetch_errors']} earnings-date fetches failed and "
+                f"{scan_diagnostics['earnings_fetch_timeouts']} timed out (>{_SCAN_FETCH_TIMEOUT_SECONDS}s); "
+                f"{scan_diagnostics['history_fetch_errors']} price-history fetches failed and "
+                f"{scan_diagnostics['history_fetch_timeouts']} timed out; out of {attempted} tickers that "
+                f"needed a live check ({scan_diagnostics['earnings_cache_hits']} others came from cache). "
+                f"Looks like Yahoo Finance is blocking or rate-limiting requests from this host, not a "
+                f"real zero-candidate result."
             )
         else:
             note = (
-                f"Scanned {scan_diagnostics['universe_size']} tickers: "
+                f"Scanned {scan_diagnostics['tickers_checked']} tickers "
+                f"({scan_diagnostics['earnings_cache_hits']} from cache, {attempted} checked live): "
                 f"{scan_diagnostics['no_upcoming_earnings']} had no earnings in the window, "
                 f"{scan_diagnostics['screened_out']} had earnings but didn't clear the screen. "
                 f"This looks like a genuine zero -- nothing currently qualifies."

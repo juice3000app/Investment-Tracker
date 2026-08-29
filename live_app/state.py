@@ -146,6 +146,18 @@ CREATE TABLE IF NOT EXISTS portfolio_imports (
     rows_json TEXT NOT NULL,    -- JSON list of the parsed CSV rows
     applied_json TEXT           -- JSON: which rows were applied and how (set on /apply)
 );
+
+-- A day's worth of cache for one ticker's earnings dates, so the daily
+-- candidate scan doesn't re-fetch all ~200+ tickers from Yahoo Finance
+-- every single run (the main driver of Yahoo's rate-limiting -- see
+-- daily_job.py's _scan_upcoming_catalysts). Purely a performance cache:
+-- deliberately left out of export_all/import_all since it's rebuildable
+-- and not real user data -- a restore just starts it empty again.
+CREATE TABLE IF NOT EXISTS earnings_date_cache (
+    ticker TEXT PRIMARY KEY,
+    catalyst_dates_json TEXT NOT NULL,   -- JSON list of ISO date strings, as Yahoo returned
+    fetched_at TEXT NOT NULL
+);
 """
 
 
@@ -478,6 +490,39 @@ def save_idle_sweep_state(
             "ticker=excluded.ticker, shares=excluded.shares, idle_days_counter=excluded.idle_days_counter, "
             "last_checked_date=excluded.last_checked_date",
             (ticker, shares, idle_days_counter, last_checked_date.isoformat()),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Earnings-date cache -- see the earnings_date_cache schema comment.
+# --------------------------------------------------------------------------- #
+
+
+def get_cached_earnings_dates(
+    ticker: str, max_age_hours: float, db_path: Path = DEFAULT_DB_PATH
+) -> Optional[list[date]]:
+    """None means "no usable cache entry -- go fetch it"; an empty list is
+    a real cached answer (Yahoo had nothing for this ticker as of last
+    fetch), distinct from "we don't know yet"."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT catalyst_dates_json, fetched_at FROM earnings_date_cache WHERE ticker=?", (ticker,)
+        ).fetchone()
+    if row is None:
+        return None
+    fetched_at = datetime.fromisoformat(row["fetched_at"])
+    if (datetime.now() - fetched_at).total_seconds() > max_age_hours * 3600:
+        return None
+    return [date.fromisoformat(d) for d in json.loads(row["catalyst_dates_json"])]
+
+
+def save_cached_earnings_dates(ticker: str, catalyst_dates: list[date], db_path: Path = DEFAULT_DB_PATH) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO earnings_date_cache (ticker, catalyst_dates_json, fetched_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(ticker) DO UPDATE SET catalyst_dates_json=excluded.catalyst_dates_json, "
+            "fetched_at=excluded.fetched_at",
+            (ticker, json.dumps([d.isoformat() for d in catalyst_dates]), datetime.now().isoformat()),
         )
 
 
