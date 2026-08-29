@@ -119,10 +119,14 @@ def fetch_earnings_dates(
     history depth on its own)."""
     _require_yfinance()
     t = yf.Ticker(ticker)
-    try:
-        df = t.get_earnings_dates(limit=60)
-    except Exception:
-        return []
+    # Deliberately NOT catching exceptions here: a ticker Yahoo genuinely has
+    # no earnings calendar for comes back as an empty/None dataframe (handled
+    # below) and is a normal, expected gap in coverage -- but a failed
+    # network call (blocked, rate-limited, timed out) is a different problem
+    # and needs to look different to the caller, not silently collapse into
+    # "no earnings" (see live_app/daily_job.py's scan diagnostics, which
+    # depend on this distinction to tell a real zero from a broken fetch).
+    df = t.get_earnings_dates(limit=60)
     if df is None or df.empty:
         return []
     dates = [d.date() if hasattr(d, "date") else d for d in df.index]

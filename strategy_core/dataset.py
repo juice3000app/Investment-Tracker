@@ -313,7 +313,10 @@ def fetch_and_build_dataset(
 
         shares = ds.fetch_shares_outstanding(u.ticker)
         sector = u.sector if u.sector else ds.fetch_sector(u.ticker)
-        catalyst_dates = ds.fetch_earnings_dates(u.ticker, lookback_start=start_date, lookahead_end=end_date)
+        try:
+            catalyst_dates = ds.fetch_earnings_dates(u.ticker, lookback_start=start_date, lookahead_end=end_date)
+        except Exception:
+            catalyst_dates = []
 
         price_history[u.ticker] = prices
         shares_outstanding[u.ticker] = shares or 0.0

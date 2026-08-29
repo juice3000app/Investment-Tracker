@@ -1,0 +1,21 @@
+HOW TO RUN THE BACKTEST PROGRAM (no command windows needed)
+
+STEP 1 - One time only:
+  Double-click "Setup.bat" in this folder.
+  A black window will pop up and do some work for a few minutes - that's normal.
+  If it says Python isn't installed, it opens a download page for you. Install
+  Python (check the box "Add python.exe to PATH" during install), then double-
+  click Setup.bat again.
+  When it says "All done!", press any key to close it.
+
+STEP 2 - Every time after that:
+  Look on your Desktop for a new icon called "Model 2 Backtest" and double-click
+  it. The program opens directly - no black window, nothing to type.
+
+If the Desktop icon doesn't show up for some reason, you can also just double-
+click "Run Backtest.vbs" in this folder instead - it does the same thing.
+
+A note: this looks like it might be a managed work computer. Some companies
+block .bat and .vbs files from running, as a security setting. If double-
+clicking Setup.bat does nothing at all (no window appears), that's probably
+why - let Claude know and we'll find another way around it.

@@ -88,10 +88,31 @@ def _check_open_position(position: state.LivePosition, params: strat.StrategyPar
     return decision, current_price, pos_state, history
 
 
-def _scan_upcoming_catalysts(params: strat.StrategyParams, today: date, already_held: set[str]) -> list[dict]:
+def _scan_upcoming_catalysts(
+    params: strat.StrategyParams, today: date, already_held: set[str]
+) -> tuple[list[dict], dict]:
     """The forward-looking scanner from spec section 4, folded into the
-    single daily job instead of being a separate tool (fix 5c)."""
+    single daily job instead of being a separate tool (fix 5c).
+
+    Returns (results, diagnostics). Every per-ticker network call is still
+    best-effort (one bad ticker shouldn't sink the whole scan), but unlike
+    the original version this now COUNTS failures instead of silently
+    discarding them -- a scan that finds zero candidates because Yahoo
+    Finance is blocking/rate-limiting the host looks identical to a scan
+    that genuinely found nothing, unless something reports the difference.
+    """
     results = []
+    diagnostics = {
+        "universe_size": 0,
+        "universe_fetch_error": None,
+        "already_held_skipped": 0,
+        "earnings_fetch_errors": 0,
+        "no_upcoming_earnings": 0,
+        "history_fetch_errors": 0,
+        "empty_history": 0,
+        "screened_out": 0,
+        "passed": 0,
+    }
     try:
         if LIVE_UNIVERSE_MODE == "index":
             universe = ds.get_universe_index_constituents()
@@ -99,30 +120,38 @@ def _scan_upcoming_catalysts(params: strat.StrategyParams, today: date, already_
             universe = ds.get_universe_auto_sweep(params.market_cap_floor, params.market_cap_ceiling)
         else:
             universe = []
-    except Exception:
+    except Exception as e:
         universe = []
+        diagnostics["universe_fetch_error"] = f"{type(e).__name__}: {e}"
+    diagnostics["universe_size"] = len(universe)
 
     window_end = today + timedelta(days=params.catalyst_window_days)
     for u in universe:
         if u.ticker in already_held:
+            diagnostics["already_held_skipped"] += 1
             continue
         try:
             catalysts = ds.fetch_earnings_dates(u.ticker, lookback_start=today, lookahead_end=window_end)
         except Exception:
+            diagnostics["earnings_fetch_errors"] += 1
             continue
         if not catalysts:
+            diagnostics["no_upcoming_earnings"] += 1
             continue
         next_catalyst = min(catalysts)
 
         try:
             history = _fetch_history(u.ticker, today)
         except Exception:
+            diagnostics["history_fetch_errors"] += 1
             continue
         if history.empty:
+            diagnostics["empty_history"] += 1
             continue
         shares_out = ds.fetch_shares_outstanding(u.ticker) or 0.0
         screen = strat.evaluate_candidate_screen(history, shares_out, params)
         if screen.passed:
+            diagnostics["passed"] += 1
             results.append(
                 {
                     "ticker": u.ticker,
@@ -130,7 +159,9 @@ def _scan_upcoming_catalysts(params: strat.StrategyParams, today: date, already_
                     "days_until": (next_catalyst - today).days,
                 }
             )
-    return results
+        else:
+            diagnostics["screened_out"] += 1
+    return results, diagnostics
 
 
 def _check_addon_trigger(position: state.LivePosition, params: strat.StrategyParams, today: date, run_at: datetime) -> Optional[dict]:
@@ -401,9 +432,34 @@ def run_once(send_email: bool = True) -> dict:
             state.log_decision(run_at, addon.ticker, "error", {"error": f"addon exit check failed: {e}"})
 
     already_held = {p.ticker for p in open_base_positions}
-    new_candidates = _scan_upcoming_catalysts(params, today, already_held)
+    new_candidates, scan_diagnostics = _scan_upcoming_catalysts(params, today, already_held)
     for c in new_candidates:
         state.log_decision(run_at, c["ticker"], "new_candidate", c)
+
+    if not new_candidates:
+        # Zero candidates is a legitimate result (the screen is strict), but
+        # it's indistinguishable from "every network call failed" unless we
+        # say so explicitly -- surface it in both places a user would look.
+        if scan_diagnostics["universe_fetch_error"]:
+            note = f"Universe fetch failed: {scan_diagnostics['universe_fetch_error']}"
+        elif scan_diagnostics["universe_size"] == 0:
+            note = "Universe list came back empty (LIVE_UNIVERSE_MODE misconfigured, or the source list is empty)."
+        elif scan_diagnostics["earnings_fetch_errors"] + scan_diagnostics["history_fetch_errors"] >= scan_diagnostics["universe_size"] * 0.5:
+            note = (
+                f"{scan_diagnostics['earnings_fetch_errors']} earnings-date fetches and "
+                f"{scan_diagnostics['history_fetch_errors']} price-history fetches failed out of "
+                f"{scan_diagnostics['universe_size']} tickers in the universe -- looks like Yahoo Finance "
+                f"is blocking or rate-limiting requests from this host, not a real zero-candidate result."
+            )
+        else:
+            note = (
+                f"Scanned {scan_diagnostics['universe_size']} tickers: "
+                f"{scan_diagnostics['no_upcoming_earnings']} had no earnings in the window, "
+                f"{scan_diagnostics['screened_out']} had earnings but didn't clear the screen. "
+                f"This looks like a genuine zero -- nothing currently qualifies."
+            )
+        errors.append({"ticker": None, "error": f"candidate scan: {note}", **scan_diagnostics})
+        state.log_decision(run_at, None, "scan_diagnostic", {"note": note})
 
     idle_sweep_buy = None
     try:

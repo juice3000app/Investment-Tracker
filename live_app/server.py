@@ -123,6 +123,7 @@ ACTIVITY_LABELS = {
     "manual_exit": ("Position closed", "info"),
     "position_removed": ("Position removed", "info"),
     "error": ("Problem during a run", "error"),
+    "scan_diagnostic": ("Candidate scan found nothing", "warning"),
 }
 
 
