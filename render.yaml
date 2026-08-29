@@ -1,0 +1,28 @@
+# Render Blueprint for live_app (Signal Ledger). Deploy: push this repo to
+# GitHub, then in Render click New -> Blueprint and point it at the repo.
+# Render reads this file and creates the service below automatically.
+#
+# The build step only installs Python deps -- it does NOT run Node/npm.
+# The frontend (live_app/frontend/) is built locally with `npm run build`
+# and its output (live_app/static/) is committed to the repo; see
+# live_app/frontend/README.md. This keeps the Render build fast and
+# dependency-free on the Node side, at the cost of remembering to rebuild
+# and commit before pushing a UI change.
+#
+# After the first deploy, set the environment variables listed in
+# DEPLOYMENT.md under the service's Environment tab (Render doesn't let a
+# blueprint commit secrets to the repo, on purpose).
+services:
+  - type: web
+    name: signal-ledger
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn live_app.server:app --bind 0.0.0.0:$PORT"
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Secrets (SMTP_*, DIGEST_TO_EMAIL, DASHBOARD_USER, DASHBOARD_PASSWORD,
+      # CRON_SECRET) are set manually in the Render dashboard -- see
+      # DEPLOYMENT.md. Do not put real credentials in this file.
