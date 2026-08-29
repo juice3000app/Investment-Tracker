@@ -23,7 +23,25 @@ services:
     # timeout can kill that request mid-scan on a slow day, before any of
     # the run's results (or the scan diagnostics) ever get written or
     # returned. 240s gives it room to actually finish.
-    startCommand: "gunicorn live_app.server:app --bind 0.0.0.0:$PORT --timeout 240"
+    #
+    # --worker-class gthread --workers 1 --threads 4: a long /api/refresh
+    # request must not block Render's own /healthz check, or Render treats
+    # the instance as failed and restarts/kills it mid-scan (confirmed live
+    # -- a "term" signal arrived ~48s into a scan under a single sync
+    # worker). The fix is threads, NOT a second worker process: --workers 2
+    # was tried and caused the service to be SIGKILLed (exit 137) -- almost
+    # certainly the free tier's memory limit, since a second gunicorn
+    # *process* duplicates the entire Python/Flask/pandas/numpy footprint.
+    # Threads share one process's memory, so a free thread can answer
+    # /healthz while another thread sits blocked on a slow Yahoo Finance
+    # call, with no extra memory cost.
+    #
+    # IMPORTANT: Render does NOT re-read this file's startCommand on a
+    # normal redeploy of an existing service (only on first creation from
+    # a blueprint) -- if this ever needs to change again, update it
+    # directly in the Render dashboard under Settings -> Start Command,
+    # not just here.
+    startCommand: "gunicorn live_app.server:app --bind 0.0.0.0:$PORT --timeout 240 --worker-class gthread --workers 1 --threads 4"
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION

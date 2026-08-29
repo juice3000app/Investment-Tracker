@@ -567,32 +567,47 @@ def run_once(send_email: bool = True) -> dict:
             note = f"Universe fetch failed: {scan_diagnostics['universe_fetch_error']}"
         elif scan_diagnostics["universe_size"] == 0:
             note = "Universe list came back empty (LIVE_UNIVERSE_MODE misconfigured, or the source list is empty)."
-        elif scan_diagnostics["stopped_early"]:
-            note = (
-                f"Scan stopped after {_SCAN_TOTAL_BUDGET_SECONDS:.0f}s to stay well under the server's "
-                f"request timeout -- only got through {scan_diagnostics['tickers_checked']} of "
-                f"{scan_diagnostics['universe_size']} tickers ({scan_diagnostics['earnings_cache_hits']} "
-                f"from cache). The rest will get picked up on the next run; each one only needs a live "
-                f"check once a day, so coverage should improve as the cache fills in."
-            )
-        elif attempted > 0 and fetch_failures >= attempted * 0.5:
-            note = (
-                f"{scan_diagnostics['earnings_fetch_errors']} earnings-date fetches failed and "
-                f"{scan_diagnostics['earnings_fetch_timeouts']} timed out (>{_SCAN_FETCH_TIMEOUT_SECONDS}s); "
-                f"{scan_diagnostics['history_fetch_errors']} price-history fetches failed and "
-                f"{scan_diagnostics['history_fetch_timeouts']} timed out; out of {attempted} tickers that "
-                f"needed a live check ({scan_diagnostics['earnings_cache_hits']} others came from cache). "
-                f"Looks like Yahoo Finance is blocking or rate-limiting requests from this host, not a "
-                f"real zero-candidate result."
-            )
         else:
-            note = (
-                f"Scanned {scan_diagnostics['tickers_checked']} tickers "
-                f"({scan_diagnostics['earnings_cache_hits']} from cache, {attempted} checked live): "
-                f"{scan_diagnostics['no_upcoming_earnings']} had no earnings in the window, "
-                f"{scan_diagnostics['screened_out']} had earnings but didn't clear the screen. "
-                f"This looks like a genuine zero -- nothing currently qualifies."
-            )
+            # Coverage and failure-rate are independent questions -- a scan
+            # can stop early AND still show every sign of Yahoo blocking it,
+            # or stop early with a perfectly healthy (if partial) result.
+            # Report both, instead of letting "stopped early" hide a real
+            # rate-limiting problem underneath it (or vice versa).
+            if scan_diagnostics["stopped_early"]:
+                coverage = (
+                    f"Scan stopped after {_SCAN_TOTAL_BUDGET_SECONDS:.0f}s to stay well under the "
+                    f"server's request timeout -- only got through {scan_diagnostics['tickers_checked']} "
+                    f"of {scan_diagnostics['universe_size']} tickers "
+                    f"({scan_diagnostics['earnings_cache_hits']} from cache). The rest will get picked "
+                    f"up on the next run; each one only needs a live check once a day, so coverage "
+                    f"should improve as the cache fills in."
+                )
+            else:
+                coverage = f"Scanned all {scan_diagnostics['tickers_checked']} tickers in the universe."
+
+            if attempted > 0 and fetch_failures >= attempted * 0.5:
+                diagnosis = (
+                    f" Of the {attempted} tickers that needed a live check this run "
+                    f"({scan_diagnostics['earnings_cache_hits']} others came from cache): "
+                    f"{scan_diagnostics['earnings_fetch_errors']} earnings-date fetches failed and "
+                    f"{scan_diagnostics['earnings_fetch_timeouts']} timed out "
+                    f"(>{_SCAN_FETCH_TIMEOUT_SECONDS}s); {scan_diagnostics['history_fetch_errors']} "
+                    f"price-history fetches failed and {scan_diagnostics['history_fetch_timeouts']} timed "
+                    f"out. That's over half -- looks like Yahoo Finance is still blocking or "
+                    f"rate-limiting requests from this host, not a real zero-candidate result."
+                )
+            elif attempted > 0:
+                diagnosis = (
+                    f" Of those {attempted} live checks: {scan_diagnostics['no_upcoming_earnings']} had "
+                    f"no earnings in the window, {scan_diagnostics['screened_out']} had earnings but "
+                    f"didn't clear the screen -- looks like a genuine zero among the tickers checked so far."
+                )
+            else:
+                # Every ticker this run was a cache hit or an already-held skip --
+                # no live checks happened at all, so there's nothing yet to
+                # diagnose about fetch health from this run alone.
+                diagnosis = ""
+            note = coverage + diagnosis
         errors.append({"ticker": None, "error": f"candidate scan: {note}", **scan_diagnostics})
         state.log_decision(run_at, None, "scan_diagnostic", {"note": note})
 
