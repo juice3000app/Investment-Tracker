@@ -172,6 +172,49 @@ class ScreenResult:
     failure_reasons: list = field(default_factory=list)
 
 
+def evaluate_candidate_screen_from_stats(
+    volatility: Optional[float],
+    avg_dollar_volume: Optional[float],
+    market_cap: Optional[float],
+    params: StrategyParams,
+) -> ScreenResult:
+    """Same reasons-checking logic as evaluate_candidate_screen, but takes
+    already-computed stats directly instead of a raw price history frame.
+    Lets a caller reuse cached per-ticker stats (see live_app/daily_job.py's
+    screen-inputs cache) without re-fetching and re-slicing live price
+    history just to recompute the exact same numbers -- the numeric
+    thresholds in `params` are applied here, at evaluation time, so a
+    settings change is picked up on the next call without needing to
+    invalidate whatever cached the stats themselves."""
+    reasons = []
+
+    if volatility is None:
+        reasons.append("insufficient_history_for_volatility")
+    elif volatility < params.min_volatility:
+        reasons.append("volatility_below_minimum")
+
+    if market_cap is None:
+        reasons.append("no_shares_outstanding")
+    else:
+        if market_cap < params.market_cap_floor:
+            reasons.append("market_cap_below_floor")
+        if market_cap > params.market_cap_ceiling:
+            reasons.append("market_cap_above_ceiling")
+
+    if avg_dollar_volume is None:
+        reasons.append("insufficient_history_for_dollar_volume")
+    elif avg_dollar_volume < params.min_avg_dollar_volume:
+        reasons.append("dollar_volume_below_minimum")
+
+    return ScreenResult(
+        passed=len(reasons) == 0,
+        volatility=volatility,
+        market_cap=market_cap,
+        avg_dollar_volume=avg_dollar_volume,
+        failure_reasons=reasons,
+    )
+
+
 def evaluate_candidate_screen(
     price_history: pd.DataFrame,
     shares_outstanding: float,
@@ -187,41 +230,15 @@ def evaluate_candidate_screen(
     `price_history` must have columns: Close, Volume, indexed/sorted by
     date ascending, with the last row being the evaluation day.
     """
-    reasons = []
-
     if price_history is None or price_history.empty:
         return ScreenResult(passed=False, failure_reasons=["no_price_history"])
 
     last_close = float(price_history["Close"].iloc[-1])
-
     vol = compute_historical_volatility(price_history["Close"])
-    if vol is None:
-        reasons.append("insufficient_history_for_volatility")
-    elif vol < params.min_volatility:
-        reasons.append("volatility_below_minimum")
-
-    mcap = approximate_market_cap(last_close, shares_outstanding) if shares_outstanding else None
-    if mcap is None:
-        reasons.append("no_shares_outstanding")
-    else:
-        if mcap < params.market_cap_floor:
-            reasons.append("market_cap_below_floor")
-        if mcap > params.market_cap_ceiling:
-            reasons.append("market_cap_above_ceiling")
-
     adv = compute_avg_dollar_volume(price_history)
-    if adv is None:
-        reasons.append("insufficient_history_for_dollar_volume")
-    elif adv < params.min_avg_dollar_volume:
-        reasons.append("dollar_volume_below_minimum")
+    mcap = approximate_market_cap(last_close, shares_outstanding) if shares_outstanding else None
 
-    return ScreenResult(
-        passed=len(reasons) == 0,
-        volatility=vol,
-        market_cap=mcap,
-        avg_dollar_volume=adv,
-        failure_reasons=reasons,
-    )
+    return evaluate_candidate_screen_from_stats(vol, adv, mcap, params)
 
 
 # --------------------------------------------------------------------------- #

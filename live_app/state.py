@@ -170,6 +170,54 @@ CREATE TABLE IF NOT EXISTS scan_universe_stats (
     universe_size INTEGER NOT NULL,
     scanned_at TEXT NOT NULL
 );
+
+-- Per-ticker screening inputs (volatility, avg dollar volume, latest
+-- close, shares outstanding), cached for the same reason as
+-- earnings_date_cache above: fetching real price history and shares
+-- outstanding is the actually expensive part of a scan, and the earnings
+-- cache alone didn't save it -- a ticker with ANY upcoming earnings date
+-- (nearly all of them, at a wide horizon) still needed both live-fetched
+-- on every single run, which is why repeated same-day refreshes made no
+-- forward progress at all. Cache the raw STATS, not the pass/fail
+-- decision, so a settings change (the universe filter sliders) is picked
+-- up immediately without needing to invalidate this cache -- same
+-- principle as caching the unfiltered earnings-date list. Purely a
+-- performance cache: left out of export_all/import_all, rebuilds itself.
+CREATE TABLE IF NOT EXISTS screen_input_cache (
+    ticker TEXT PRIMARY KEY,
+    volatility REAL,
+    avg_dollar_volume REAL,
+    last_close REAL NOT NULL,
+    shares_outstanding REAL NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+
+-- Where the next scan should start in the universe list (a plain
+-- position offset, not a ticker identity -- the universe can reorder
+-- slightly over time, and this only needs to roughly spread coverage
+-- across runs, not track a specific ticker exactly). Without this, a
+-- scan that stops early (time budget) always restarts at position 0 next
+-- time, so tickers past whatever position the budget cuts off at are
+-- never reached, ever, no matter how many times it runs. Purely a
+-- performance/coverage aid: left out of export_all/import_all.
+CREATE TABLE IF NOT EXISTS scan_cursor (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    offset_value INTEGER NOT NULL
+);
+
+-- One row per "ACTION RECOMMENDED" email actually sent, so a recommendation
+-- that keeps re-triggering every day it's not acted on (e.g. a stop-loss
+-- that's still breached) only ever emails once, not once per daily job
+-- run. Real user-meaningful state (affects whether a Render redeploy's
+-- restore causes a duplicate re-alert), unlike the caches above -- IS
+-- included in export_all/import_all.
+CREATE TABLE IF NOT EXISTS sent_action_alerts (
+    action TEXT NOT NULL,
+    alert_key TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (action, alert_key)
+);
 """
 
 
@@ -572,6 +620,77 @@ def get_scan_universe_size(db_path: Path = DEFAULT_DB_PATH) -> Optional[dict]:
     return {"universe_size": row["universe_size"], "scanned_at": row["scanned_at"]}
 
 
+def get_cached_screen_inputs(ticker: str, max_age_hours: float, db_path: Path = DEFAULT_DB_PATH) -> Optional[dict]:
+    """A ticker's cached volatility/avg_dollar_volume/last_close/shares_outstanding,
+    or None if there isn't a fresh one -- see screen_input_cache's schema
+    comment for why this exists (the earnings-date cache alone didn't
+    stop repeated live history/shares fetches for in-window tickers)."""
+    cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT volatility, avg_dollar_volume, last_close, shares_outstanding "
+            "FROM screen_input_cache WHERE ticker=? AND fetched_at > ?",
+            (ticker, cutoff),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "volatility": row["volatility"],
+        "avg_dollar_volume": row["avg_dollar_volume"],
+        "last_close": row["last_close"],
+        "shares_outstanding": row["shares_outstanding"],
+    }
+
+
+def save_cached_screen_inputs(
+    ticker: str, volatility: Optional[float], avg_dollar_volume: Optional[float],
+    last_close: float, shares_outstanding: float, db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO screen_input_cache "
+            "(ticker, volatility, avg_dollar_volume, last_close, shares_outstanding, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(ticker) DO UPDATE SET volatility=excluded.volatility, "
+            "avg_dollar_volume=excluded.avg_dollar_volume, last_close=excluded.last_close, "
+            "shares_outstanding=excluded.shares_outstanding, fetched_at=excluded.fetched_at",
+            (ticker, volatility, avg_dollar_volume, last_close, shares_outstanding, datetime.now().isoformat()),
+        )
+
+
+def get_scan_offset(db_path: Path = DEFAULT_DB_PATH) -> int:
+    """Where the next scan should start in the universe list. Defaults to
+    0 (start of the list) if no scan has ever recorded a stopping point."""
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT offset_value FROM scan_cursor WHERE id=1").fetchone()
+    return row["offset_value"] if row is not None else 0
+
+
+def save_scan_offset(offset: int, db_path: Path = DEFAULT_DB_PATH) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO scan_cursor (id, offset_value) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET offset_value=excluded.offset_value",
+            (offset,),
+        )
+
+
+def has_alert_been_sent(action: str, alert_key: str, db_path: Path = DEFAULT_DB_PATH) -> bool:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sent_action_alerts WHERE action=? AND alert_key=?", (action, alert_key)
+        ).fetchone()
+    return row is not None
+
+
+def mark_alert_sent(action: str, alert_key: str, ticker: str, sent_at: datetime, db_path: Path = DEFAULT_DB_PATH) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO sent_action_alerts (action, alert_key, ticker, sent_at) VALUES (?, ?, ?, ?)",
+            (action, alert_key, ticker, sent_at.isoformat()),
+        )
+
+
 def log_idle_sweep_event(
     run_date: date, action: str, ticker: str, shares: float, price: float, amount: float, fees: float,
     db_path: Path = DEFAULT_DB_PATH,
@@ -675,6 +794,12 @@ def export_all(db_path: Path = DEFAULT_DB_PATH) -> dict:
             "idle_sweep_state": _all("idle_sweep_state"),
             "portfolio_snapshots": _all("portfolio_snapshots"),
             "portfolio_imports": _all("portfolio_imports"),
+            # Real user-meaningful state (not a rebuildable cache like
+            # earnings_date_cache/screen_input_cache/scan_cursor): without
+            # it, a post-redeploy restore would forget which "ACTION
+            # RECOMMENDED" emails were already sent, and could re-alert on
+            # something the user already saw before the redeploy.
+            "sent_action_alerts": _all("sent_action_alerts"),
         }
 
 
@@ -684,6 +809,7 @@ def import_all(bundle: dict, db_path: Path = DEFAULT_DB_PATH) -> None:
     tables = [
         "positions", "decision_log", "settings", "cash_adjustments",
         "idle_sweep_events", "idle_sweep_state", "portfolio_snapshots", "portfolio_imports",
+        "sent_action_alerts",
     ]
     with _connect(db_path) as conn:
         for table in tables:

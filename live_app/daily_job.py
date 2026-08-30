@@ -55,6 +55,18 @@ _SCAN_FETCH_TIMEOUT_SECONDS = 10
 # again for all ~200+ tickers.
 _EARNINGS_CACHE_MAX_AGE_HOURS = 20.0
 
+# How long a cached screen-inputs answer (volatility, avg dollar volume,
+# last close, shares outstanding) is trusted before re-fetching live price
+# history/shares outstanding. This is the fix for the deeper bug the
+# earnings-date cache alone didn't cover: ANY ticker whose earnings date
+# falls inside the scan window (nearly all of them, at a wide horizon)
+# still triggered a live _fetch_history + fetch_shares_outstanding call on
+# every single run, which is why repeated same-day "Refresh now" clicks
+# made no forward progress past the first ~80 tickers. Same 20h convention
+# as the earnings-date cache, for the same reason (one fresh check per
+# ticker per day; a same-day repeat reuses it).
+_SCREEN_INPUT_CACHE_MAX_AGE_HOURS = 20.0
+
 # A small gap between tickers that actually need a live Yahoo call (cache
 # misses only -- cache hits skip this entirely). Bursting ~200+ requests
 # back-to-back is what triggers Yahoo's rate limiting in the first place;
@@ -163,6 +175,7 @@ def _scan_upcoming_catalysts(
         "earnings_fetch_errors": 0,
         "earnings_fetch_timeouts": 0,
         "no_upcoming_earnings": 0,
+        "screen_input_cache_hits": 0,
         "history_fetch_errors": 0,
         "history_fetch_timeouts": 0,
         "empty_history": 0,
@@ -189,6 +202,22 @@ def _scan_upcoming_catalysts(
         state.save_scan_universe_size(diagnostics["universe_size"], datetime.now())
 
     window_end = today + timedelta(days=params.catalyst_window_days)
+
+    # Resume where the last scan left off instead of always restarting at
+    # index 0 -- otherwise a scan that stops early on its time budget
+    # would check the exact same early tickers every run, forever, and
+    # never reach the tail of the universe (the cross-day half of the
+    # "candidate list stalls" bug; the screen-input cache below is the
+    # same-day half). Offset is a plain position, not a ticker identity,
+    # since the universe order can drift slightly over time. Computed
+    # before the pool/try block so it's always defined for the `finally`
+    # below, even if something earlier in the scan itself blows up.
+    n = len(universe)
+    start_offset = state.get_scan_offset() if n > 0 else 0
+    if start_offset >= n:
+        start_offset = 0
+    order = list(range(start_offset, n)) + list(range(0, start_offset))
+
     # A small pool, not a single worker: a `with ThreadPoolExecutor(...)`
     # block's default shutdown(wait=True) on exit would block this
     # function's *return* on any task we've already given up on via
@@ -205,7 +234,8 @@ def _scan_upcoming_catalysts(
             return pool.submit(fn, *args, **kwargs).result(timeout=_SCAN_FETCH_TIMEOUT_SECONDS)
 
         scan_started_at = time.monotonic()
-        for u in universe:
+        for idx in order:
+            u = universe[idx]
             if time.monotonic() - scan_started_at > _SCAN_TOTAL_BUDGET_SECONDS:
                 diagnostics["stopped_early"] = True
                 break
@@ -253,22 +283,52 @@ def _scan_upcoming_catalysts(
                 continue
             next_catalyst = min(catalysts)
 
-            try:
-                history = call_with_timeout(_fetch_history, u.ticker, today)
-            except concurrent.futures.TimeoutError:
-                diagnostics["history_fetch_timeouts"] += 1
-                continue
-            except Exception:
-                diagnostics["history_fetch_errors"] += 1
-                continue
-            if history.empty:
-                diagnostics["empty_history"] += 1
-                continue
-            try:
-                shares_out = call_with_timeout(ds.fetch_shares_outstanding, u.ticker) or 0.0
-            except Exception:
-                shares_out = 0.0
-            screen = strat.evaluate_candidate_screen(history, shares_out, params)
+            # Cached second: an in-window ticker (nearly all of them, at a
+            # wide horizon) still needed a live _fetch_history +
+            # fetch_shares_outstanding call on every run even with a warm
+            # earnings-date cache above -- this is the deeper, same-day
+            # bug (3 consecutive "Refresh now" clicks made zero progress
+            # past ~84 tickers). Cache the raw STATS (volatility, avg
+            # dollar volume, last close, shares outstanding), not the
+            # pass/fail decision, so a settings change is picked up
+            # immediately on the next call without needing to invalidate
+            # this cache -- same principle as the earnings-date cache.
+            cached_stats = state.get_cached_screen_inputs(
+                u.ticker, max_age_hours=_SCREEN_INPUT_CACHE_MAX_AGE_HOURS
+            )
+            if cached_stats is not None:
+                diagnostics["screen_input_cache_hits"] += 1
+                last_close = cached_stats["last_close"]
+                vol = cached_stats["volatility"]
+                adv = cached_stats["avg_dollar_volume"]
+                shares_out = cached_stats["shares_outstanding"]
+            else:
+                try:
+                    history = call_with_timeout(_fetch_history, u.ticker, today)
+                except concurrent.futures.TimeoutError:
+                    diagnostics["history_fetch_timeouts"] += 1
+                    continue
+                except Exception:
+                    diagnostics["history_fetch_errors"] += 1
+                    continue
+                if history.empty:
+                    diagnostics["empty_history"] += 1
+                    continue
+                try:
+                    shares_out = call_with_timeout(ds.fetch_shares_outstanding, u.ticker) or 0.0
+                except Exception:
+                    shares_out = 0.0
+                last_close = float(history["Close"].iloc[-1])
+                vol = strat.compute_historical_volatility(history["Close"])
+                adv = strat.compute_avg_dollar_volume(history)
+                # Only cache a real fetch -- same "don't cache a failure"
+                # convention as the earnings-date cache, so a bad fetch
+                # retries next run instead of being stuck on stale/empty
+                # numbers for a full day.
+                state.save_cached_screen_inputs(u.ticker, vol, adv, last_close, shares_out)
+
+            mcap = strat.approximate_market_cap(last_close, shares_out) if shares_out else None
+            screen = strat.evaluate_candidate_screen_from_stats(vol, adv, mcap, params)
             if screen.passed:
                 diagnostics["passed"] += 1
                 results.append(
@@ -291,6 +351,8 @@ def _scan_upcoming_catalysts(
         # timeout above. The abandoned thread(s) die with the process/
         # gunicorn worker; nothing here waits on them.
         pool.shutdown(wait=False, cancel_futures=True)
+    if n > 0:
+        state.save_scan_offset((start_offset + diagnostics["tickers_checked"]) % n)
     return results, diagnostics
 
 
@@ -363,7 +425,7 @@ def _check_addon_position(addon: state.LivePosition, params: strat.StrategyParam
             state.log_decision(run_at, addon.ticker, "addon_merged", merge_event)
             return None, merge_event, current_price
 
-        exit_rec = {"ticker": addon.ticker, "lot_type": "o1", "reason": decision.reason, "price": current_price}
+        exit_rec = {"position_id": addon.id, "ticker": addon.ticker, "lot_type": "o1", "reason": decision.reason, "price": current_price}
         state.log_decision(run_at, addon.ticker, "addon_exit_recommended", exit_rec)
         return exit_rec, None, current_price
 
@@ -371,7 +433,7 @@ def _check_addon_position(addon: state.LivePosition, params: strat.StrategyParam
         should_exit = strat.evaluate_o2_addon_exit(addon_state, today, current_price, history)
         if not should_exit:
             return None, None, current_price
-        exit_rec = {"ticker": addon.ticker, "lot_type": "o2", "reason": "o2_first_down_day", "price": current_price}
+        exit_rec = {"position_id": addon.id, "ticker": addon.ticker, "lot_type": "o2", "reason": "o2_first_down_day", "price": current_price}
         state.log_decision(run_at, addon.ticker, "addon_exit_recommended", exit_rec)
         return exit_rec, None, current_price
 
@@ -466,6 +528,30 @@ def _record_snapshot(today: date, positions_value: float) -> None:
     state.record_portfolio_snapshot(today, cash_balance, positions_value, sweep_value)
 
 
+def _maybe_send_action_email(
+    action: str, alert_key: str, ticker: str, detail: dict, run_at: datetime
+) -> Optional[bool]:
+    """Sends one 'ACTION RECOMMENDED' email for a single action, unless
+    this exact action+key was already emailed -- keeps a recommendation
+    that keeps re-triggering every run (e.g. a stop-loss still breached)
+    from re-emailing every single day. Returns True/False for a real
+    sent/failed outcome, or None if skipped as an already-sent duplicate.
+    Only marks the alert as sent on an actual successful SMTP send (same
+    "only cache/mark a real success" convention used elsewhere in this
+    module), so a transient failure retries on the next run instead of
+    going silent forever."""
+    if state.has_alert_been_sent(action, alert_key):
+        return None
+    subject, html_body, text_body = notify.build_action_email_content(action, ticker, detail)
+    try:
+        notify.send_daily_digest(subject, html_body, text_body)
+    except Exception as e:
+        state.log_decision(run_at, ticker, "error", {"error": f"action email send failed: {e}", "action": action})
+        return False
+    state.mark_alert_sent(action, alert_key, ticker, run_at)
+    return True
+
+
 def run_once(send_email: bool = True) -> dict:
     """The whole daily job. Returns a summary dict (used by the dashboard's
     'run now' button and by tests) regardless of whether email sending is
@@ -510,6 +596,7 @@ def run_once(send_email: bool = True) -> dict:
         if decision.should_exit:
             exited_today.append(
                 {
+                    "position_id": position.id,
                     "ticker": position.ticker,
                     "reason": decision.reason,
                     "price": current_price,
@@ -659,21 +746,48 @@ def run_once(send_email: bool = True) -> dict:
         "errors": errors,
     }
 
+    emails_sent = 0
+    emails_failed = 0
     if send_email:
-        try:
-            subject, html_body, text_body = notify.build_digest_content(
-                exited_today, close_to_trigger, new_candidates, run_at,
-                addon_opportunities=addon_opportunities,
-                addon_exits_recommended=addon_exits_recommended,
-                addon_merges=addon_merges,
-            )
-            notify.send_daily_digest(subject, html_body, text_body)
-            summary["email_sent"] = True
-        except Exception as e:
-            summary["email_sent"] = False
-            summary["email_error"] = str(e)
-            state.log_decision(run_at, None, "error", {"error": f"digest send failed: {e}"})
+        for rec in exited_today:
+            key = f"{rec['position_id']}:{rec['reason']}"
+            sent = _maybe_send_action_email("sell_base", key, rec["ticker"], rec, run_at)
+            if sent is True:
+                emails_sent += 1
+            elif sent is False:
+                emails_failed += 1
 
+        for rec in addon_exits_recommended:
+            key = f"{rec['position_id']}:{rec['reason']}"
+            sent = _maybe_send_action_email("sell_addon", key, rec["ticker"], rec, run_at)
+            if sent is True:
+                emails_sent += 1
+            elif sent is False:
+                emails_failed += 1
+
+        # Buy-side only fires once the recommended entry date actually
+        # arrives (Mike: "Email should fire once recommended entry date
+        # arrives") -- not the day the candidate first appears on the
+        # scan, which can be well before it's time to act.
+        for c in new_candidates:
+            if c.get("recommended_entry_date") == today.isoformat():
+                key = f"{c['ticker']}:{c['recommended_entry_date']}"
+                sent = _maybe_send_action_email("buy_base", key, c["ticker"], c, run_at)
+                if sent is True:
+                    emails_sent += 1
+                elif sent is False:
+                    emails_failed += 1
+
+        for opp in addon_opportunities:
+            key = f"{opp['base_position_id']}:{opp['lot_type']}"
+            sent = _maybe_send_action_email("buy_addon", key, opp["ticker"], opp, run_at)
+            if sent is True:
+                emails_sent += 1
+            elif sent is False:
+                emails_failed += 1
+
+    summary["emails_sent"] = emails_sent
+    summary["emails_failed"] = emails_failed
     return summary
 
 
