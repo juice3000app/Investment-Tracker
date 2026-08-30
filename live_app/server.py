@@ -205,7 +205,7 @@ def add_position():
     body = request.get_json(force=True, silent=True) or {}
     try:
         entry_price = float(body["entry_price"])
-        dollar_amount = float(body["dollar_amount"])
+        shares = float(body["shares"])
         ticker = str(body["ticker"]).strip().upper()
         entry_date = date.fromisoformat(body["entry_date"])
         catalyst_date = date.fromisoformat(body["catalyst_date"])
@@ -214,8 +214,8 @@ def add_position():
 
     peak_price = _backfill_peak_price(ticker, entry_date, entry_price)
     position = state.LivePosition(
-        ticker=ticker, entry_date=entry_date, entry_price=entry_price, dollar_amount=dollar_amount,
-        shares=dollar_amount / entry_price if entry_price else 0.0, catalyst_date=catalyst_date,
+        ticker=ticker, entry_date=entry_date, entry_price=entry_price, dollar_amount=shares * entry_price,
+        shares=shares, catalyst_date=catalyst_date,
         sector=body.get("sector") or None, peak_price=peak_price, lot_type="base",
     )
     position_id = state.add_position(position)
@@ -235,7 +235,7 @@ def add_addon_position():
         parent_id = int(body["parent_id"])
         lot_type = body["lot_type"]
         entry_price = float(body["entry_price"])
-        dollar_amount = float(body["dollar_amount"])
+        shares = float(body["shares"])
         entry_date = date.fromisoformat(body["entry_date"])
     except (KeyError, ValueError) as e:
         return _err(f"invalid or missing field: {e}")
@@ -248,8 +248,8 @@ def add_addon_position():
 
     peak_price = _backfill_peak_price(base.ticker, entry_date, entry_price)
     addon = state.LivePosition(
-        ticker=base.ticker, entry_date=entry_date, entry_price=entry_price, dollar_amount=dollar_amount,
-        shares=dollar_amount / entry_price if entry_price else 0.0, catalyst_date=base.catalyst_date,
+        ticker=base.ticker, entry_date=entry_date, entry_price=entry_price, dollar_amount=shares * entry_price,
+        shares=shares, catalyst_date=base.catalyst_date,
         sector=base.sector, peak_price=peak_price, lot_type=lot_type, parent_id=base.id,
     )
     addon_id = state.add_position(addon)
@@ -296,7 +296,21 @@ def close_position_route(position_id):
     p = state.get_position(position_id)
     if p is None:
         return _err("position not found", 404)
-    exit_price = float(body["exit_price"]) if body.get("exit_price") not in (None, "") else p.entry_price
+    if body.get("exit_price") not in (None, ""):
+        exit_price = float(body["exit_price"])
+    else:
+        # No exit price given -- fetch a real live price rather than ever
+        # fabricating one. Silently falling back to entry_price here would
+        # record a fake flat P&L as permanent trade history.
+        try:
+            exit_price = ds.fetch_current_price(p.ticker)
+        except Exception:
+            exit_price = None
+        if exit_price is None:
+            return _err(
+                f"couldn't fetch a live price for {p.ticker} to use as the exit price -- enter one manually.",
+                502,
+            )
     exit_date = date.fromisoformat(body["exit_date"]) if body.get("exit_date") else date.today()
     reason_text = (body.get("reason") or "").strip()
     exit_reason = f"manual: {reason_text}" if reason_text else "manual"
@@ -335,7 +349,20 @@ def candidates():
             seen.add(entry["ticker"])
         if len(results) >= 25:
             break
-    return jsonify({"candidates": results})
+
+    # Cache coverage: how much of the universe has a fresh, usable
+    # earnings-date cache entry right now, vs. the universe size as of
+    # the most recent scan -- makes it obvious in the UI when a "zero
+    # candidates" result might just mean the scan hasn't reached every
+    # ticker yet (see daily_job.py's stopped_early diagnostic).
+    cached = state.count_fresh_earnings_cache_entries(daily_job._EARNINGS_CACHE_MAX_AGE_HOURS)
+    universe_stats = state.get_scan_universe_size()
+    cache_coverage = {
+        "cached": cached,
+        "universe_size": universe_stats["universe_size"] if universe_stats else None,
+        "as_of": universe_stats["scanned_at"] if universe_stats else None,
+    }
+    return jsonify({"candidates": results, "cache_coverage": cache_coverage})
 
 
 @app.route("/api/activity", methods=["GET"])
@@ -472,12 +499,16 @@ def import_apply():
 def _apply_add_position(proposal: dict) -> int:
     entry_price = float(proposal["entry_price"])
     entry_date = date.fromisoformat(proposal["entry_date"])
-    dollar_amount = float(proposal["dollar_amount"])
+    # build_proposals already computes shares directly from the CSV row's
+    # own price*quantity -- use that authoritative value rather than
+    # re-deriving it from dollar_amount, same reasoning as the manual
+    # add-position routes above.
+    shares = float(proposal["shares"])
     ticker = proposal["ticker"].strip().upper()
     peak_price = _backfill_peak_price(ticker, entry_date, entry_price)
     position = state.LivePosition(
-        ticker=ticker, entry_date=entry_date, entry_price=entry_price, dollar_amount=dollar_amount,
-        shares=dollar_amount / entry_price if entry_price else 0.0,
+        ticker=ticker, entry_date=entry_date, entry_price=entry_price, dollar_amount=shares * entry_price,
+        shares=shares,
         catalyst_date=entry_date, sector=None, peak_price=peak_price, lot_type="base",
     )
     position_id = state.add_position(position)

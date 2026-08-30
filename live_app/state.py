@@ -31,7 +31,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -157,6 +157,18 @@ CREATE TABLE IF NOT EXISTS earnings_date_cache (
     ticker TEXT PRIMARY KEY,
     catalyst_dates_json TEXT NOT NULL,   -- JSON list of ISO date strings, as Yahoo returned
     fetched_at TEXT NOT NULL
+);
+
+-- Single-row record of the most recent scan's universe size, so the
+-- dashboard can show "N of M tickers cached" without re-fetching the
+-- universe (a live Wikipedia scrape/fallback) on every page load -- it
+-- only needs to change once per actual scan, not once per dashboard
+-- visit. Purely a display convenience, like earnings_date_cache: left
+-- out of export_all/import_all, rebuilds itself on the next scan.
+CREATE TABLE IF NOT EXISTS scan_universe_stats (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    universe_size INTEGER NOT NULL,
+    scanned_at TEXT NOT NULL
 );
 """
 
@@ -524,6 +536,40 @@ def save_cached_earnings_dates(ticker: str, catalyst_dates: list[date], db_path:
             "fetched_at=excluded.fetched_at",
             (ticker, json.dumps([d.isoformat() for d in catalyst_dates]), datetime.now().isoformat()),
         )
+
+
+def count_fresh_earnings_cache_entries(max_age_hours: float, db_path: Path = DEFAULT_DB_PATH) -> int:
+    """How many tickers currently have a usable (not-yet-stale) cached
+    earnings-date entry -- the numerator for a "cached N of M tickers"
+    coverage display. A stale entry (older than max_age_hours) doesn't
+    count, since the scan will treat it as needing a fresh fetch too."""
+    cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM earnings_date_cache WHERE fetched_at > ?", (cutoff,)
+        ).fetchone()
+    return row["n"]
+
+
+def save_scan_universe_size(universe_size: int, scanned_at: datetime, db_path: Path = DEFAULT_DB_PATH) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO scan_universe_stats (id, universe_size, scanned_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET universe_size=excluded.universe_size, "
+            "scanned_at=excluded.scanned_at",
+            (universe_size, scanned_at.isoformat()),
+        )
+
+
+def get_scan_universe_size(db_path: Path = DEFAULT_DB_PATH) -> Optional[dict]:
+    """The universe size as of the most recent scan, plus when that scan
+    ran -- or None if no scan has ever recorded one yet (e.g. a brand new
+    deploy before the first refresh)."""
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT universe_size, scanned_at FROM scan_universe_stats WHERE id=1").fetchone()
+    if row is None:
+        return None
+    return {"universe_size": row["universe_size"], "scanned_at": row["scanned_at"]}
 
 
 def log_idle_sweep_event(

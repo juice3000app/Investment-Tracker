@@ -16,18 +16,37 @@ import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
-import { api, ApiError, type ApiPosition, type Candidate, type ActivityCard, type Settings, type PortfolioSnapshot, type ImportProposal, type PositionHistory } from '@/lib/api';
+import { api, ApiError, type ApiPosition, type Candidate, type CacheCoverage, type ActivityCard, type Settings, type PortfolioSnapshot, type ImportProposal, type PositionHistory } from '@/lib/api';
 
 type ViewName = 'overview' | 'signals' | 'portfolio' | 'activity' | 'strategies';
 
 const money = (value: number) =>
   value.toLocaleString('en-CA', { style: 'currency', currency: 'CAD' });
 
-const positionValue = (p: ApiPosition) => p.shares * (p.status === 'closed' ? p.exit_price ?? p.last_known_price ?? p.entry_price : p.last_known_price ?? p.entry_price);
-const positionChange = (p: ApiPosition) => {
-  const current = p.status === 'closed' ? p.exit_price ?? p.last_known_price ?? p.entry_price : p.last_known_price ?? p.entry_price;
-  return ((current / p.entry_price) - 1) * 100;
+// The price to use for a position's own P&L: for a closed position, its
+// real exit price; for an open one, the last price the daily job/a manual
+// refresh actually observed. null means genuinely unknown (no evaluation
+// has happened yet, e.g. right after recording a backdated position) --
+// callers must show that honestly, never quietly substitute entry_price
+// as if the position hadn't moved.
+const currentPrice = (p: ApiPosition): number | null => (p.status === 'closed' ? p.exit_price : p.last_known_price);
+
+// Per-position P&L display: null price -> null value/change ("price
+// pending" in the UI), not a fabricated 0%.
+const positionValue = (p: ApiPosition): number | null => {
+  const price = currentPrice(p);
+  return price === null ? null : p.shares * price;
 };
+const positionChange = (p: ApiPosition): number | null => {
+  const price = currentPrice(p);
+  return price === null ? null : ((price / p.entry_price) - 1) * 100;
+};
+
+// Portfolio-wide totals need one number to add up -- for a position with
+// no price yet, value it at cost (entry price) rather than leaving the
+// total undefined. This fallback is only for aggregate totals; the
+// per-position display above must never use it.
+const positionValueAtCost = (p: ApiPosition) => p.shares * (currentPrice(p) ?? p.entry_price);
 
 const STRATEGY_META: Array<{ key: keyof Settings['strategies']; name: string }> = [
   { key: 'base_enabled', name: 'Base earnings' },
@@ -57,7 +76,7 @@ const PARAM_FIELDS: ParamField[] = [
   { group: 'universe', key: 'max_market_cap_b', label: 'Maximum market cap', min: 0.1, max: 10, step: 0.1, format: (v) => `$${v.toFixed(1)}B` },
   { group: 'universe', key: 'min_dollar_volume_m', label: 'Minimum dollar volume', min: 0.1, max: 20, step: 0.1, format: (v) => `$${v.toFixed(1)}M` },
   { group: 'universe', key: 'earnings_horizon_days', label: 'Earnings horizon', min: 1, max: 120, format: (v) => `${v} days` },
-  { group: 'base', key: 'entry_lead_days', label: 'Entry lead time', min: 0, max: 10, format: (v) => `${v} trading day${v === 1 ? '' : 's'}`, notWiredKey: 'base.entry_lead_days' },
+  { group: 'base', key: 'entry_lead_days', label: 'Entry lead time', min: 0, max: 10, format: (v) => `${v} trading day${v === 1 ? '' : 's'} before catalyst` },
   { group: 'base', key: 'base_allocation_pct', label: 'Base allocation', min: 1, max: 100, format: pct },
   { group: 'base', key: 'sector_limit', label: 'Sector limit', min: 1, max: 10, format: (v) => `${v} stocks` },
   { group: 'base', key: 'trailing_stop_pct', label: 'Trailing stop', min: 1, max: 80, format: pct },
@@ -147,6 +166,7 @@ function PositionList({ title, description, positions, onSelect, empty }: { titl
           <p className="px-4 py-6 text-sm text-muted-foreground">{empty ?? 'No positions.'}</p>
         ) : (
           positions.map((p) => {
+            const value = positionValue(p);
             const change = positionChange(p);
             return (
               <button type="button" key={p.id} onClick={() => onSelect(p)}
@@ -157,10 +177,14 @@ function PositionList({ title, description, positions, onSelect, empty }: { titl
                   <p className="truncate text-xs text-muted-foreground">{p.sector || '—'} · {p.status === 'open' ? `since ${p.entry_date}` : `closed ${p.exit_date}`}</p>
                 </div>
                 <div className="text-right">
-                  <p className="font-semibold tabular-nums">{money(positionValue(p))}</p>
-                  <p className={`inline-flex items-center text-xs font-semibold ${change >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                    {change >= 0 ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}{change >= 0 ? '+' : ''}{change.toFixed(1)}%
-                  </p>
+                  <p className="font-semibold tabular-nums">{value === null ? '—' : money(value)}</p>
+                  {change === null ? (
+                    <p className="text-xs text-muted-foreground">Price pending</p>
+                  ) : (
+                    <p className={`inline-flex items-center text-xs font-semibold ${change >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {change >= 0 ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}{change >= 0 ? '+' : ''}{change.toFixed(1)}%
+                    </p>
+                  )}
                 </div>
                 <ChevronRight className="size-4 text-muted-foreground" />
               </button>
@@ -182,6 +206,7 @@ export default function App() {
   const [cashBalance, setCashBalance] = useState(0);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [cacheCoverage, setCacheCoverage] = useState<CacheCoverage | null>(null);
   const [activity, setActivity] = useState<ActivityCard[]>([]);
   const [snapshots, setSnapshots] = useState<PortfolioSnapshot[]>([]);
   const [idleSweep, setIdleSweep] = useState<{ ticker: string; shares: number } | null>(null);
@@ -192,7 +217,7 @@ export default function App() {
   const [cashDirection, setCashDirection] = useState<'deposit' | 'withdrawal'>('deposit');
   const [cashAmount, setCashAmount] = useState('1000');
   const [addOpen, setAddOpen] = useState(false);
-  const [addPrefill, setAddPrefill] = useState<{ ticker: string; catalyst_date: string } | null>(null);
+  const [addPrefill, setAddPrefill] = useState<{ ticker: string; catalyst_date: string; entry_date?: string } | null>(null);
   const [addonOpen, setAddonOpen] = useState(false);
   const [positionOpen, setPositionOpen] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
@@ -219,6 +244,7 @@ export default function App() {
     setAvailableBase(pos.available_base_positions);
     setSettings(s);
     setCandidates(cand.candidates);
+    setCacheCoverage(cand.cache_coverage);
     setActivity(act.activity);
     setSnapshots(snap.snapshots);
     setIdleSweep(sweep.state.shares > 0 ? sweep.state : null);
@@ -232,9 +258,9 @@ export default function App() {
 
   const openPositions = positions.filter((p) => p.status === 'open');
   const closedPositions = positions.filter((p) => p.status === 'closed');
-  const totalPortfolio = cashBalance + openPositions.reduce((sum, p) => sum + positionValue(p), 0) +
+  const totalPortfolio = cashBalance + openPositions.reduce((sum, p) => sum + positionValueAtCost(p), 0) +
     (idleSweep ? (snapshots.at(-1)?.sweep_value ?? 0) : 0);
-  const strategyCapital = openPositions.reduce((sum, p) => sum + positionValue(p), 0);
+  const strategyCapital = openPositions.reduce((sum, p) => sum + positionValueAtCost(p), 0);
   const activePct = totalPortfolio ? Math.round((strategyCapital / totalPortfolio) * 100) : 0;
 
   const withNotice = async (fn: () => Promise<void>, successMessage: string) => {
@@ -253,8 +279,12 @@ export default function App() {
     setSelected(p);
     setEditShares(String(Math.round(p.shares * 10000) / 10000));
     setEditEntryPrice(String(p.entry_price));
-    setEditExitPrice(String(p.exit_price ?? p.last_known_price ?? p.entry_price));
-    setEditExitDate(p.exit_date ?? new Date().toISOString().slice(0, 10));
+    // Only a genuinely closed position has a real exit price/date -- for
+    // an open one, leave both blank rather than pre-filling a fabricated
+    // "projection" (last known/entry price, today's date) that looks like
+    // a real planned exit.
+    setEditExitPrice(p.exit_price != null ? String(p.exit_price) : '');
+    setEditExitDate(p.exit_date ?? '');
     setSelectedHistory(null);
     setPositionOpen(true);
     try {
@@ -436,13 +466,38 @@ export default function App() {
 
       {activeView === 'signals' && (
         <SimpleView title="Signals" subtitle="Candidates passing the screen right now">
+          {cacheCoverage && cacheCoverage.universe_size !== null && (
+            <Card>
+              <CardContent className="flex items-center justify-between gap-3 py-3 text-sm">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Gauge className="size-4" />
+                  <span>
+                    Scan coverage: <span className="font-medium text-foreground">{cacheCoverage.cached} of {cacheCoverage.universe_size}</span> tickers cached
+                    {cacheCoverage.universe_size > 0 && ` (${Math.round((cacheCoverage.cached / cacheCoverage.universe_size) * 100)}%)`}
+                  </span>
+                </div>
+                {cacheCoverage.as_of && (
+                  <span className="text-xs text-muted-foreground">as of {new Date(cacheCoverage.as_of).toLocaleString()}</span>
+                )}
+              </CardContent>
+              {cacheCoverage.cached < cacheCoverage.universe_size && (
+                <CardContent className="pt-0 text-xs text-muted-foreground">
+                  Not every ticker has been checked yet — a "no candidates" result may just mean coverage isn't complete. Hit Refresh now to keep going; each ticker only needs one live check per day.
+                </CardContent>
+              )}
+            </Card>
+          )}
           {candidates.length === 0 ? (
             <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No candidates yet — click Refresh now, or wait for the next daily job run.</CardContent></Card>
           ) : candidates.map((c) => (
             <Card key={c.ticker}>
               <CardContent className="flex items-center justify-between gap-3 py-4">
-                <div><p className="font-semibold">{c.ticker}</p><p className="text-xs text-muted-foreground">Catalyst {c.catalyst_date} · {c.days_until} day{c.days_until === 1 ? '' : 's'} away</p></div>
-                <Button size="sm" onClick={() => { setAddPrefill({ ticker: c.ticker, catalyst_date: c.catalyst_date }); setAddOpen(true); }}>Record purchase<ChevronRight /></Button>
+                <div>
+                  <p className="font-semibold">{c.ticker}</p>
+                  <p className="text-xs text-muted-foreground">Catalyst {c.catalyst_date} · {c.days_until} day{c.days_until === 1 ? '' : 's'} away</p>
+                  <p className="text-xs font-medium text-emerald-700">Recommended entry: {c.recommended_entry_date}</p>
+                </div>
+                <Button size="sm" onClick={() => { setAddPrefill({ ticker: c.ticker, catalyst_date: c.catalyst_date, entry_date: c.recommended_entry_date }); setAddOpen(true); }}>Record purchase<ChevronRight /></Button>
               </CardContent>
             </Card>
           ))}
@@ -532,9 +587,14 @@ export default function App() {
                 <Field><FieldLabel htmlFor="edit-entry">Average entry price (CAD)</FieldLabel><Input id="edit-entry" inputMode="decimal" value={editEntryPrice} onChange={(e) => setEditEntryPrice(e.target.value)} /></Field>
               </div>
               {selected.status === 'open' && (
-                <div className="grid gap-4 rounded-xl bg-secondary/50 p-3 sm:grid-cols-2">
-                  <Field><FieldLabel htmlFor="exit-price">Exit price (CAD)</FieldLabel><Input id="exit-price" inputMode="decimal" value={editExitPrice} onChange={(e) => setEditExitPrice(e.target.value)} /></Field>
-                  <Field><FieldLabel htmlFor="exit-date">Exit date</FieldLabel><Input id="exit-date" type="date" value={editExitDate} onChange={(e) => setEditExitDate(e.target.value)} /></Field>
+                <div className="rounded-xl bg-secondary/50 p-3">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field><FieldLabel htmlFor="exit-price">Exit price (CAD)</FieldLabel>
+                      <Input id="exit-price" inputMode="decimal" placeholder="Leave blank to fetch live price" value={editExitPrice} onChange={(e) => setEditExitPrice(e.target.value)} /></Field>
+                    <Field><FieldLabel htmlFor="exit-date">Exit date</FieldLabel>
+                      <Input id="exit-date" type="date" placeholder="Leave blank for today" value={editExitDate} onChange={(e) => setEditExitDate(e.target.value)} /></Field>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">Only fill these in when you're actually closing this position. Leave blank to close at today's date using a live fetched price.</p>
                 </div>
               )}
               <DialogFooter className="flex-wrap sm:justify-between">
@@ -576,7 +636,8 @@ export default function App() {
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader><DialogTitle>Record a purchase</DialogTitle><DialogDescription>Enter what you actually bought — this never places an order for you.</DialogDescription></DialogHeader>
-          <AddPositionForm prefillTicker={addPrefill?.ticker} prefillCatalyst={addPrefill?.catalyst_date}
+          <AddPositionForm key={`${addPrefill?.ticker ?? ''}-${addPrefill?.entry_date ?? ''}`}
+            prefillTicker={addPrefill?.ticker} prefillCatalyst={addPrefill?.catalyst_date} prefillEntryDate={addPrefill?.entry_date}
             onSubmit={(body) => withNotice(async () => { await api.addPosition(body); }, `${body.ticker} recorded.`).then(() => setAddOpen(false))} />
         </DialogContent>
       </Dialog>
@@ -641,6 +702,7 @@ export default function App() {
               })}
             </div>
           )}
+          <p className="text-center text-[11px] text-muted-foreground">Build: {new Date(__BUILD_TIME__).toLocaleString()}</p>
           <DialogFooter><Button variant="outline" onClick={() => setSettingsOpen(false)}>Cancel</Button><Button onClick={saveParameters}>Save parameters</Button></DialogFooter>
         </DialogContent>
       </Dialog>
@@ -700,15 +762,15 @@ export default function App() {
   );
 }
 
-function AddPositionForm({ prefillTicker, prefillCatalyst, onSubmit }: {
-  prefillTicker?: string; prefillCatalyst?: string;
-  onSubmit: (body: { ticker: string; entry_date: string; entry_price: number; dollar_amount: number; catalyst_date: string; sector?: string }) => void;
+function AddPositionForm({ prefillTicker, prefillCatalyst, prefillEntryDate, onSubmit }: {
+  prefillTicker?: string; prefillCatalyst?: string; prefillEntryDate?: string;
+  onSubmit: (body: { ticker: string; entry_date: string; entry_price: number; shares: number; catalyst_date: string; sector?: string }) => void;
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const [ticker, setTicker] = useState(prefillTicker ?? '');
-  const [entryDate, setEntryDate] = useState(today);
+  const [entryDate, setEntryDate] = useState(prefillEntryDate ?? today);
   const [entryPrice, setEntryPrice] = useState('');
-  const [dollarAmount, setDollarAmount] = useState('');
+  const [shares, setShares] = useState('');
   const [catalystDate, setCatalystDate] = useState(prefillCatalyst ?? today);
   const [sector, setSector] = useState('');
 
@@ -720,12 +782,12 @@ function AddPositionForm({ prefillTicker, prefillCatalyst, onSubmit }: {
         <Field><FieldLabel>Entry date</FieldLabel><Input type="date" value={entryDate} onChange={(e) => setEntryDate(e.target.value)} /></Field>
         <Field><FieldLabel>Catalyst date</FieldLabel><Input type="date" value={catalystDate} onChange={(e) => setCatalystDate(e.target.value)} /></Field>
         <Field><FieldLabel>Entry price</FieldLabel><Input inputMode="decimal" value={entryPrice} onChange={(e) => setEntryPrice(e.target.value)} /></Field>
-        <Field><FieldLabel>Dollar amount</FieldLabel><Input inputMode="decimal" value={dollarAmount} onChange={(e) => setDollarAmount(e.target.value)} /></Field>
+        <Field><FieldLabel>Shares purchased</FieldLabel><Input inputMode="decimal" value={shares} onChange={(e) => setShares(e.target.value)} /></Field>
       </div>
       <p className="text-xs text-muted-foreground">Entry date can be in the past — the trailing-stop peak is backfilled from real price history since then.</p>
       <DialogFooter>
-        <Button onClick={() => onSubmit({ ticker, entry_date: entryDate, entry_price: Number(entryPrice), dollar_amount: Number(dollarAmount), catalyst_date: catalystDate, sector: sector || undefined })}
-          disabled={!ticker || !entryPrice || !dollarAmount}>Add</Button>
+        <Button onClick={() => onSubmit({ ticker, entry_date: entryDate, entry_price: Number(entryPrice), shares: Number(shares), catalyst_date: catalystDate, sector: sector || undefined })}
+          disabled={!ticker || !entryPrice || !shares}>Add</Button>
       </DialogFooter>
     </div>
   );
@@ -733,14 +795,14 @@ function AddPositionForm({ prefillTicker, prefillCatalyst, onSubmit }: {
 
 function AddonPositionForm({ basePositions, onSubmit }: {
   basePositions: { id: number; ticker: string; entry_date: string; catalyst_date: string }[];
-  onSubmit: (body: { parent_id: number; lot_type: 'o1' | 'o2'; entry_date: string; entry_price: number; dollar_amount: number }) => void;
+  onSubmit: (body: { parent_id: number; lot_type: 'o1' | 'o2'; entry_date: string; entry_price: number; shares: number }) => void;
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const [parentId, setParentId] = useState<number | ''>('');
   const [lotType, setLotType] = useState<'o1' | 'o2'>('o1');
   const [entryDate, setEntryDate] = useState(today);
   const [entryPrice, setEntryPrice] = useState('');
-  const [dollarAmount, setDollarAmount] = useState('');
+  const [shares, setShares] = useState('');
 
   return (
     <div className="space-y-4">
@@ -758,11 +820,11 @@ function AddonPositionForm({ basePositions, onSubmit }: {
       <div className="grid gap-4 sm:grid-cols-2">
         <Field><FieldLabel>Entry date</FieldLabel><Input type="date" value={entryDate} onChange={(e) => setEntryDate(e.target.value)} /></Field>
         <Field><FieldLabel>Entry price</FieldLabel><Input inputMode="decimal" value={entryPrice} onChange={(e) => setEntryPrice(e.target.value)} /></Field>
-        <Field><FieldLabel>Dollar amount</FieldLabel><Input inputMode="decimal" value={dollarAmount} onChange={(e) => setDollarAmount(e.target.value)} /></Field>
+        <Field><FieldLabel>Shares purchased</FieldLabel><Input inputMode="decimal" value={shares} onChange={(e) => setShares(e.target.value)} /></Field>
       </div>
       <DialogFooter>
-        <Button disabled={!parentId || !entryPrice || !dollarAmount}
-          onClick={() => parentId && onSubmit({ parent_id: parentId, lot_type: lotType, entry_date: entryDate, entry_price: Number(entryPrice), dollar_amount: Number(dollarAmount) })}>
+        <Button disabled={!parentId || !entryPrice || !shares}
+          onClick={() => parentId && onSubmit({ parent_id: parentId, lot_type: lotType, entry_date: entryDate, entry_price: Number(entryPrice), shares: Number(shares) })}>
           Add add-on lot
         </Button>
       </DialogFooter>

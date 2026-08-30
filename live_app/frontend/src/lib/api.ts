@@ -45,7 +45,14 @@ export interface HistoryPoint { date: string; price: number }
 export interface HistoryEvent { date: string; label: string; kind: string }
 export interface PositionHistory { points: HistoryPoint[]; events: HistoryEvent[] }
 
-export interface Candidate { ticker: string; catalyst_date: string; days_until: number }
+export interface Candidate { ticker: string; catalyst_date: string; days_until: number; recommended_entry_date: string }
+
+// How much of the universe currently has a fresh, usable earnings-date
+// cache entry, as of the most recent scan -- lets the UI show "N of M
+// tickers cached" so it's obvious when a scan hasn't reached everything
+// yet, instead of a "0 candidates" result reading as a final answer.
+// universe_size/as_of are null until the very first scan has ever run.
+export interface CacheCoverage { cached: number; universe_size: number | null; as_of: string | null }
 
 export interface ActivityCard {
   ticker: string | null;
@@ -112,9 +119,9 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   positions: () => call<PositionsResponse>('/api/positions'),
   positionHistory: (id: number) => call<PositionHistory>(`/api/positions/${id}/history`),
-  addPosition: (body: { ticker: string; entry_date: string; entry_price: number; dollar_amount: number; catalyst_date: string; sector?: string }) =>
+  addPosition: (body: { ticker: string; entry_date: string; entry_price: number; shares: number; catalyst_date: string; sector?: string }) =>
     call<{ position: ApiPosition }>('/api/positions', { method: 'POST', body: JSON.stringify(body) }),
-  addAddonPosition: (body: { parent_id: number; lot_type: 'o1' | 'o2'; entry_date: string; entry_price: number; dollar_amount: number }) =>
+  addAddonPosition: (body: { parent_id: number; lot_type: 'o1' | 'o2'; entry_date: string; entry_price: number; shares: number }) =>
     call<{ position: ApiPosition }>('/api/positions/addon', { method: 'POST', body: JSON.stringify(body) }),
   updatePosition: (id: number, body: { shares?: number; entry_price?: number; reopen?: boolean }) =>
     call<{ position: ApiPosition }>(`/api/positions/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
@@ -122,7 +129,7 @@ export const api = {
     call<{ ok: true }>(`/api/positions/${id}/close`, { method: 'POST', body: JSON.stringify(body) }),
   removePosition: (id: number) => call<{ ok: true }>(`/api/positions/${id}/remove`, { method: 'POST' }),
 
-  candidates: () => call<{ candidates: Candidate[] }>('/api/candidates'),
+  candidates: () => call<{ candidates: Candidate[]; cache_coverage: CacheCoverage }>('/api/candidates'),
   activity: (limit = 50) => call<{ activity: ActivityCard[] }>(`/api/activity?limit=${limit}`),
 
   settings: () => call<Settings>('/api/settings'),

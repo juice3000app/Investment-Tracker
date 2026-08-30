@@ -101,6 +101,20 @@ def _trading_day_after(history, d: date) -> Optional[date]:
     return later[0]
 
 
+def _business_days_before(d: date, n: int) -> date:
+    """`d` minus `n` business days (Mon-Fri), skipping weekends only --
+    good enough for an advisory "recommended entry date" shown on a
+    candidate card (real market holidays are rare and this is a
+    reminder, not a trade execution). n=0 returns `d` itself."""
+    result = d
+    remaining = n
+    while remaining > 0:
+        result -= timedelta(days=1)
+        if result.weekday() < 5:  # Mon=0 .. Fri=4
+            remaining -= 1
+    return result
+
+
 def _check_open_position(position: state.LivePosition, params: strat.StrategyParams, today: date):
     """Fetches fresh price history for one position and replays the exact
     same exit rules the backtester uses. Returns (decision, current_price,
@@ -128,7 +142,7 @@ def _check_open_position(position: state.LivePosition, params: strat.StrategyPar
 
 
 def _scan_upcoming_catalysts(
-    params: strat.StrategyParams, today: date, already_held: set[str]
+    params: strat.StrategyParams, today: date, already_held: set[str], entry_lead_days: int = 1
 ) -> tuple[list[dict], dict]:
     """The forward-looking scanner from spec section 4, folded into the
     single daily job instead of being a separate tool (fix 5c).
@@ -168,6 +182,11 @@ def _scan_upcoming_catalysts(
         universe = []
         diagnostics["universe_fetch_error"] = f"{type(e).__name__}: {e}"
     diagnostics["universe_size"] = len(universe)
+    if diagnostics["universe_fetch_error"] is None:
+        # Only record a genuine, successful fetch -- a transient universe
+        # fetch failure shouldn't reset the dashboard's "N of M cached"
+        # denominator to 0 on a scan that never got a real universe list.
+        state.save_scan_universe_size(diagnostics["universe_size"], datetime.now())
 
     window_end = today + timedelta(days=params.catalyst_window_days)
     # A small pool, not a single worker: a `with ThreadPoolExecutor(...)`
@@ -257,6 +276,10 @@ def _scan_upcoming_catalysts(
                         "ticker": u.ticker,
                         "catalyst_date": next_catalyst.isoformat(),
                         "days_until": (next_catalyst - today).days,
+                        # Advisory only -- Mike enters his own real purchase
+                        # date by hand; this just saves him doing the
+                        # business-day math for when to place the order.
+                        "recommended_entry_date": _business_days_before(next_catalyst, entry_lead_days).isoformat(),
                     }
                 )
             else:
@@ -539,7 +562,8 @@ def run_once(send_email: bool = True) -> dict:
             state.log_decision(run_at, addon.ticker, "error", {"error": f"addon exit check failed: {e}"})
 
     already_held = {p.ticker for p in open_base_positions}
-    new_candidates, scan_diagnostics = _scan_upcoming_catalysts(params, today, already_held)
+    entry_lead_days = live_settings.load_entry_lead_days()
+    new_candidates, scan_diagnostics = _scan_upcoming_catalysts(params, today, already_held, entry_lead_days)
     for c in new_candidates:
         state.log_decision(run_at, c["ticker"], "new_candidate", c)
 

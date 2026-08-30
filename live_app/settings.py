@@ -13,15 +13,23 @@ things live here:
    0.40, raw dollar amounts) -- what the actual engine (screening,
    entry/exit, Mechanism O, idle sweep) consumes.
 
-A few sliders inherited from the original Signal Ledger mockup don't
-correspond to any real, tested engine behavior yet: entry timing is
-always the close of C-1 (the day before a catalyst), Mechanism O's
-trigger check is always exactly C+1, and O2's exit is a whole trading
-day's close, not an intraday hour. Rather than silently drop those
-controls (changing the look of the settings dialog) or silently pretend
-they do something, they're kept here with harmless stored defaults and
-listed in NOT_WIRED so the frontend can show them disabled with a short
-note -- honest about what's real.
+A couple of sliders inherited from the original Signal Ledger mockup
+still don't correspond to any real, tested engine behavior: Mechanism
+O's trigger check is always exactly C+1, and O2's exit is a whole
+trading day's close, not an intraday hour. Rather than silently drop
+those controls (changing the look of the settings dialog) or silently
+pretend they do something, they're kept here with harmless stored
+defaults and listed in NOT_WIRED so the frontend can show them disabled
+with a short note -- honest about what's real.
+
+`base.entry_lead_days` used to be in that list too, but it's genuinely
+wired now: the candidate scanner (daily_job._scan_upcoming_catalysts)
+uses it to compute a "recommended entry date" shown on each candidate
+card (catalyst date minus this many business days). This is advisory
+only -- Mike always enters his own real purchase date by hand in
+"Record a purchase," so this doesn't touch the tested backtest engine's
+own C-1 entry-timing assumption (strategy_core/portfolio.py), which is
+a separate, backtest-only concern.
 """
 
 from __future__ import annotations
@@ -54,7 +62,7 @@ DEFAULTS: dict[str, Any] = {
         "earnings_horizon_days": _BASE_DEFAULTS.catalyst_window_days,
     },
     "base": {
-        "entry_lead_days": 1,  # NOT WIRED -- entry is always C-1, see module docstring
+        "entry_lead_days": 1,  # business days before the catalyst for the "recommended entry date" shown on candidate cards
         "base_allocation_pct": _BASE_DEFAULTS.position_size_pct * 100.0,
         "sector_limit": _BASE_DEFAULTS.max_positions_per_sector,
         "trailing_stop_pct": _BASE_DEFAULTS.stop_loss_pct * 100.0,
@@ -82,7 +90,6 @@ DEFAULTS: dict[str, Any] = {
 # Dotted paths the frontend should render disabled, with the reason shown
 # alongside them.
 NOT_WIRED = {
-    "base.entry_lead_days": "Entries always happen at the close of the day before the catalyst (C-1) -- this isn't adjustable yet.",
     "dip.check_delay_days": "Buy-the-Dip's trigger is always checked exactly one trading day after the catalyst (C+1) -- this isn't adjustable yet.",
     "spike.exit_lead_hours": "Sell-the-Spike exits at the close of the first down day -- there's no intraday/hour-based exit yet.",
 }
@@ -161,3 +168,14 @@ def load_params(db_path=state.DEFAULT_DB_PATH) -> strat.StrategyParams:
     """Convenience: current settings straight to StrategyParams, for
     daily_job and the candidate scanner to consume."""
     return to_strategy_params(load_ui_settings(db_path=db_path))
+
+
+def load_entry_lead_days(db_path=state.DEFAULT_DB_PATH) -> int:
+    """entry_lead_days doesn't map to any StrategyParams field (it's
+    advisory-only, see module docstring) -- read separately from the raw
+    UI settings for the candidate scanner's "recommended entry date"."""
+    ui = load_ui_settings(db_path=db_path)
+    try:
+        return max(0, int(ui["base"]["entry_lead_days"]))
+    except (KeyError, TypeError, ValueError):
+        return DEFAULTS["base"]["entry_lead_days"]
