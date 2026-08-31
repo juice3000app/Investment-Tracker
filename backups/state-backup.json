@@ -1,5 +1,5 @@
 {
-  "exported_at": "2026-08-31T00:45:09.362356",
+  "exported_at": "2026-08-31T00:49:36.864135",
   "version": 1,
   "positions": [],
   "decision_log": [
@@ -44,6 +44,34 @@
       "ticker": null,
       "action": "scan_diagnostic",
       "detail": "{\"note\": \"Scan stopped after 180s to stay well under the server's request timeout -- only got through 88 of 220 tickers (0 from cache). The rest will get picked up on the next run; each one only needs a live check once a day, so coverage should improve as the cache fills in. Of those 88 live checks: 82 had no earnings in the window, 6 had earnings but didn't clear the screen -- looks like a genuine zero among the tickers checked so far.\"}"
+    },
+    {
+      "id": 7,
+      "run_at": "2026-08-31T00:46:34.790983",
+      "ticker": "GSY.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"GSY.TO\", \"catalyst_date\": \"2026-11-05\", \"days_until\": 66, \"recommended_entry_date\": \"2026-11-04\"}"
+    },
+    {
+      "id": 8,
+      "run_at": "2026-08-31T00:46:34.790983",
+      "ticker": "IAU.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"IAU.TO\", \"catalyst_date\": \"2026-11-12\", \"days_until\": 73, \"recommended_entry_date\": \"2026-11-11\"}"
+    },
+    {
+      "id": 9,
+      "run_at": "2026-08-31T00:46:34.790983",
+      "ticker": "LSPD.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"LSPD.TO\", \"catalyst_date\": \"2026-11-05\", \"days_until\": 66, \"recommended_entry_date\": \"2026-11-04\"}"
+    },
+    {
+      "id": 10,
+      "run_at": "2026-08-31T00:46:34.790983",
+      "ticker": "LAC.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"LAC.TO\", \"catalyst_date\": \"2026-11-13\", \"days_until\": 74, \"recommended_entry_date\": \"2026-11-12\"}"
     }
   ],
   "settings": [
@@ -55,7 +83,15 @@
   ],
   "cash_adjustments": [],
   "idle_sweep_events": [],
-  "idle_sweep_state": [],
+  "idle_sweep_state": [
+    {
+      "id": 1,
+      "ticker": "VFV.TO",
+      "shares": 0.0,
+      "idle_days_counter": 0,
+      "last_checked_date": "2026-08-31"
+    }
+  ],
   "portfolio_snapshots": [
     {
       "id": 1,
