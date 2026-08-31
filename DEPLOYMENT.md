@@ -45,10 +45,12 @@ git push origin main
 - The service sleeps after ~15 minutes of no traffic and takes 30-60
   seconds to wake on the next request (checking the dashboard from your
   phone after a while means one slow load, then it's fast).
-- **A new deploy wipes the on-disk SQLite state file** -- Render's free
-  tier has no persistent disk. That's what step 6 (Backup) below exists
-  to cover. Do the export/import dance every time you redeploy, or you
-  lose your live positions, cash ledger, and settings.
+- **Every sleep/wake cycle wipes the on-disk SQLite state file, not just a
+  redeploy** -- Render's free tier has no persistent disk, and waking up
+  from idle boots a genuinely fresh container. For a dashboard you check a
+  few times a day, this happens constantly, not just when you ship a code
+  change. Set up **GitHub auto-backup** (step 3a below) so this heals
+  itself automatically instead of silently losing data between checks.
 
 ## 3. Set environment variables (in Render -> your service -> Environment)
 
@@ -68,8 +70,40 @@ Strategies tab.
 | `SMTP_APP_PASSWORD` | an app password, NOT your real password | see step 4 |
 | `DIGEST_TO_EMAIL` | where the digest should land | can be the same address as `SMTP_USER` |
 | `LIVE_UNIVERSE_MODE` | `index` (default) or `auto_sweep` | which universe the forward scanner sweeps |
+| `GITHUB_BACKUP_TOKEN` | a GitHub fine-grained personal access token | see step 3a -- optional, but strongly recommended on the free plan |
+| `GITHUB_BACKUP_REPO` | `juice3000app/Investment-Tracker` | the repo the backup file gets written to |
+| `GITHUB_BACKUP_PATH` | `backups/state-backup.json` | any path in that repo -- created automatically on first backup |
+| `GITHUB_BACKUP_BRANCH` | `main` | optional, defaults to `main` if unset |
 
 Redeploy after setting these (Render does this automatically on save).
+
+## 3a. Set up automatic GitHub backup (recommended)
+
+This is what closes the "every sleep/wake cycle wipes the database" gap
+above, for free, with no action needed from you day to day: after every
+daily job run (and every manual "Refresh now"), the app pushes a full
+state backup to a JSON file in your own GitHub repo. If the server ever
+wakes up into a genuinely empty database, it automatically pulls that
+backup back down before serving any requests -- so a cold start after an
+idle period restores your positions, cash, settings, and history instead
+of showing zeros.
+
+1. On GitHub, go to **Settings -> Developer settings -> Personal access
+   tokens -> Fine-grained tokens -> Generate new token**.
+2. Give it a name (e.g. "signal-ledger-backup"), set **Resource owner** to
+   your account, and under **Repository access** pick **Only select
+   repositories** -> `Investment-Tracker`.
+3. Under **Permissions -> Repository permissions**, set **Contents** to
+   **Read and write**. Leave everything else at "No access".
+4. Generate the token and copy it -- GitHub only shows it once.
+5. In Render, set the four `GITHUB_BACKUP_*` variables from the table
+   above (`GITHUB_BACKUP_TOKEN` is the token you just copied).
+6. Redeploy (or wait for Render to auto-redeploy after saving env vars).
+
+That's it -- no dashboard button to click, nothing to remember before a
+redeploy. The manual export/import flow in step 6 still exists as a
+belt-and-suspenders option (e.g. to keep an offline copy, or to migrate
+data by hand), but with this set up you shouldn't need it for routine use.
 
 ## 4. Get an SMTP app password (Gmail example)
 
@@ -103,11 +137,13 @@ the state file.
 You can trigger it manually any time from cron-job.org's dashboard, or by
 opening that URL directly, to test before waiting for the schedule.
 
-## 6. Backup: export before / import after every redeploy
+## 6. Backup: manual export/import (optional if you set up step 3a)
 
-This is the durability workaround for staying on Render's free tier
-(no persistent disk). From the dashboard's **Strategies** tab, under
-**Backup**:
+If you set up GitHub auto-backup in step 3a, this manual flow is a
+belt-and-suspenders option, not a required routine -- the app backs
+itself up and restores itself automatically. Keep reading if you want an
+offline copy, want to migrate data by hand, or skipped step 3a. From the
+dashboard's **Strategies** tab, under **Backup**:
 
 - **Before you push a code change:** click **Export backup**. It downloads
   one JSON file containing every position, the cash ledger, strategy
@@ -135,7 +171,8 @@ whatever's live -- positions, cash, and any settings tweaks you'd made.
 
 ## Known limitations, by design
 
-- Free Render disk isn't durable across redeploys -- see step 6.
+- Free Render disk isn't durable across redeploys, or across any
+  sleep/wake cycle -- see step 3a (automatic) and step 6 (manual).
 - The forward scanner's universe (`LIVE_UNIVERSE_MODE`) is either the S&P/TSX
   Composite snapshot or the bundled ticker list for auto-sweep -- same
   limitations as the backtester's `data_sources.py`, described there.

@@ -822,3 +822,27 @@ def import_all(bundle: dict, db_path: Path = DEFAULT_DB_PATH) -> None:
                     f"INSERT INTO {table} ({','.join(cols)}) VALUES ({placeholders})",
                     [row[c] for c in cols],
                 )
+
+
+def is_fresh_database(db_path: Path = DEFAULT_DB_PATH) -> bool:
+    """True if nothing meaningful has ever been recorded in this database
+    -- used at server startup to decide whether to auto-restore from the
+    GitHub backup (see github_backup.py): Render's free tier has no
+    persistent disk, so a cold start after the instance sleeps is a fresh,
+    empty database, indistinguishable from a genuinely brand-new deploy.
+
+    Checks every table export_all()/import_all() actually carry (real
+    user-meaningful state) -- deliberately excludes the pure performance
+    caches (earnings_date_cache, screen_input_cache, scan_cursor), since
+    a fresh scan can populate those on its own and their presence or
+    absence says nothing about whether real user data was lost."""
+    bundle = export_all(db_path)
+    if bundle.get("settings"):
+        return False
+    for key in (
+        "positions", "decision_log", "cash_adjustments", "idle_sweep_events",
+        "portfolio_snapshots", "portfolio_imports", "sent_action_alerts",
+    ):
+        if bundle.get(key):
+            return False
+    return True

@@ -47,5 +47,15 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       # Secrets (SMTP_*, DIGEST_TO_EMAIL, DASHBOARD_USER, DASHBOARD_PASSWORD,
-      # CRON_SECRET) are set manually in the Render dashboard -- see
-      # DEPLOYMENT.md. Do not put real credentials in this file.
+      # CRON_SECRET, GITHUB_BACKUP_TOKEN, GITHUB_BACKUP_REPO,
+      # GITHUB_BACKUP_PATH, GITHUB_BACKUP_BRANCH) are set manually in the
+      # Render dashboard -- see DEPLOYMENT.md. Do not put real credentials
+      # in this file.
+      #
+      # GITHUB_BACKUP_* (optional but strongly recommended on the free
+      # plan): free tier has no persistent disk, so every idle-timeout
+      # sleep/wake cycle -- not just a redeploy -- boots into a genuinely
+      # empty SQLite database. When these are set, the daily job pushes a
+      # full state backup to a file in your own GitHub repo after every
+      # run, and the server restores from that backup automatically on
+      # startup if it wakes up into an empty database. See DEPLOYMENT.md.

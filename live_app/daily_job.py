@@ -29,7 +29,7 @@ from typing import Optional
 from strategy_core import data_sources as ds
 from strategy_core import strategy as strat
 
-from . import notify, settings as live_settings, state
+from . import github_backup, notify, settings as live_settings, state
 
 # How far back to pull price history per open position, so the stagnation
 # rolling lookback and volatility screen both have enough data.
@@ -788,6 +788,16 @@ def run_once(send_email: bool = True) -> dict:
 
     summary["emails_sent"] = emails_sent
     summary["emails_failed"] = emails_failed
+
+    # Best-effort off-instance backup after every run (daily job or manual
+    # refresh alike) -- Render's free tier has no persistent disk, so the
+    # next time this instance sleeps and wakes back up, its SQLite state
+    # is gone; this is what a later cold start restores from (see
+    # server.py's startup check). push_backup never raises -- a GitHub
+    # outage or missing config just means no backup happened this run,
+    # not a failed daily job.
+    summary["backup_pushed"] = github_backup.push_backup(state.export_all())
+
     return summary
 
 

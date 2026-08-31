@@ -28,7 +28,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from strategy_core import data_sources as ds
-from . import csv_import, daily_job, settings as live_settings, state
+from . import csv_import, daily_job, github_backup, settings as live_settings, state
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -37,6 +37,33 @@ app = Flask(__name__, static_folder=None)
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD")
 CRON_SECRET = os.environ.get("CRON_SECRET")
+
+
+def _maybe_restore_from_github_backup() -> bool:
+    """Runs once per process start (called at module load, right below).
+    Render's free tier has no persistent disk, so a cold start after the
+    instance sleeps (its normal behavior after ~15 minutes idle, not just
+    a code redeploy) boots into a fresh, empty SQLite file -- genuinely
+    indistinguishable from a brand-new deploy. If that's what just
+    happened, pull the last automated backup (see github_backup.py,
+    pushed after every daily_job.run_once()) and restore it, so the app
+    doesn't quietly show $0.00/0 positions/0 candidates after every nap.
+    Best-effort and silent if unconfigured or the pull fails -- must
+    never be why the server fails to start. Returns True only on an
+    actual restore, so callers/tests can tell a no-op from a restore."""
+    try:
+        if not state.is_fresh_database():
+            return False
+        bundle = github_backup.pull_backup()
+        if not bundle:
+            return False
+        state.import_all(bundle)
+        return True
+    except Exception:
+        return False
+
+
+_maybe_restore_from_github_backup()
 
 LOT_LABELS = {"base": "Base", "o1": "O1", "o2": "O2"}
 
