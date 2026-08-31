@@ -1,5 +1,5 @@
 {
-  "exported_at": "2026-08-31T00:49:36.864135",
+  "exported_at": "2026-08-31T00:52:32.063814",
   "version": 1,
   "positions": [],
   "decision_log": [
@@ -72,6 +72,118 @@
       "ticker": "LAC.TO",
       "action": "new_candidate",
       "detail": "{\"ticker\": \"LAC.TO\", \"catalyst_date\": \"2026-11-13\", \"days_until\": 74, \"recommended_entry_date\": \"2026-11-12\"}"
+    },
+    {
+      "id": 11,
+      "run_at": "2026-08-31T00:52:04.022907",
+      "ticker": null,
+      "action": "cash_adjusted",
+      "detail": "{\"direction\": \"deposit\", \"amount\": 1000.0, \"note\": null}"
+    },
+    {
+      "id": 12,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "TVK.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"TVK.TO\", \"catalyst_date\": \"2026-12-10\", \"days_until\": 101, \"recommended_entry_date\": \"2026-12-09\"}"
+    },
+    {
+      "id": 13,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "VET.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"VET.TO\", \"catalyst_date\": \"2026-11-04\", \"days_until\": 65, \"recommended_entry_date\": \"2026-11-03\"}"
+    },
+    {
+      "id": 14,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "VZLA.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"VZLA.TO\", \"catalyst_date\": \"2026-09-07\", \"days_until\": 7, \"recommended_entry_date\": \"2026-09-04\"}"
+    },
+    {
+      "id": 15,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "VNP.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"VNP.TO\", \"catalyst_date\": \"2026-11-02\", \"days_until\": 63, \"recommended_entry_date\": \"2026-10-30\"}"
+    },
+    {
+      "id": 16,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "ABRA.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"ABRA.TO\", \"catalyst_date\": \"2026-11-12\", \"days_until\": 73, \"recommended_entry_date\": \"2026-11-11\"}"
+    },
+    {
+      "id": 17,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "ARE.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"ARE.TO\", \"catalyst_date\": \"2026-10-28\", \"days_until\": 58, \"recommended_entry_date\": \"2026-10-27\"}"
+    },
+    {
+      "id": 18,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "AIF.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"AIF.TO\", \"catalyst_date\": \"2026-11-05\", \"days_until\": 66, \"recommended_entry_date\": \"2026-11-04\"}"
+    },
+    {
+      "id": 19,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "USA.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"USA.TO\", \"catalyst_date\": \"2026-11-09\", \"days_until\": 70, \"recommended_entry_date\": \"2026-11-06\"}"
+    },
+    {
+      "id": 20,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "ATS.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"ATS.TO\", \"catalyst_date\": \"2026-11-04\", \"days_until\": 65, \"recommended_entry_date\": \"2026-11-03\"}"
+    },
+    {
+      "id": 21,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "ASM.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"ASM.TO\", \"catalyst_date\": \"2026-11-05\", \"days_until\": 66, \"recommended_entry_date\": \"2026-11-04\"}"
+    },
+    {
+      "id": 22,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "BDGI.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"BDGI.TO\", \"catalyst_date\": \"2026-11-04\", \"days_until\": 65, \"recommended_entry_date\": \"2026-11-03\"}"
+    },
+    {
+      "id": 23,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "GSY.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"GSY.TO\", \"catalyst_date\": \"2026-11-05\", \"days_until\": 66, \"recommended_entry_date\": \"2026-11-04\"}"
+    },
+    {
+      "id": 24,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "IAU.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"IAU.TO\", \"catalyst_date\": \"2026-11-12\", \"days_until\": 73, \"recommended_entry_date\": \"2026-11-11\"}"
+    },
+    {
+      "id": 25,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "LSPD.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"LSPD.TO\", \"catalyst_date\": \"2026-11-05\", \"days_until\": 66, \"recommended_entry_date\": \"2026-11-04\"}"
+    },
+    {
+      "id": 26,
+      "run_at": "2026-08-31T00:50:08.958016",
+      "ticker": "LAC.TO",
+      "action": "new_candidate",
+      "detail": "{\"ticker\": \"LAC.TO\", \"catalyst_date\": \"2026-11-13\", \"days_until\": 74, \"recommended_entry_date\": \"2026-11-12\"}"
     }
   ],
   "settings": [
@@ -81,14 +193,23 @@
       "updated_at": "2026-08-31T00:42:48.729674"
     }
   ],
-  "cash_adjustments": [],
+  "cash_adjustments": [
+    {
+      "id": 1,
+      "direction": "deposit",
+      "amount": 1000.0,
+      "note": null,
+      "effective_at": "2026-08-31",
+      "created_at": "2026-08-31T00:52:04.017168"
+    }
+  ],
   "idle_sweep_events": [],
   "idle_sweep_state": [
     {
       "id": 1,
       "ticker": "VFV.TO",
       "shares": 0.0,
-      "idle_days_counter": 0,
+      "idle_days_counter": 1,
       "last_checked_date": "2026-08-31"
     }
   ],
@@ -96,10 +217,10 @@
     {
       "id": 1,
       "snapshot_date": "2026-08-31",
-      "cash_balance": 0.0,
+      "cash_balance": 1000.0,
       "positions_value": 0.0,
       "sweep_value": 0.0,
-      "total_value": 0.0,
+      "total_value": 1000.0,
       "created_at": "2026-08-31T00:45:09.356432"
     }
   ],
